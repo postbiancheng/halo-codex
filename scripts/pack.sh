@@ -7,8 +7,8 @@ cd "$ROOT"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 NAME="$(sed -n 's/^ *"id": "\(.*\)".*/\1/p' pack.json | head -1)"
 OUT_DIR="${ROOT}/dist"
-WASM_SRC="target/wasm32-unknown-unknown/release/agent2api_codex_websocket.wasm"
-WASM_DST="${OUT_DIR}/codex-websocket.wasm"
+WASM_SRC="target/wasm32-unknown-unknown/release/agent2api_halo_codex.wasm"
+WASM_DST="${OUT_DIR}/halo-codex.wasm"
 ZIP="${OUT_DIR}/${NAME}-${VERSION}.zip"
 
 # Prefer the rustup toolchain binaries. Homebrew rust on PATH often lacks wasm32 std.
@@ -36,9 +36,11 @@ fi
 mkdir -p "$OUT_DIR"
 cp -f "$WASM_SRC" "$WASM_DST"
 cp -f pack.json wasm.json "$OUT_DIR/"
+rm -rf "${OUT_DIR}/assets"
+cp -R assets "${OUT_DIR}/assets"
 
 # Keep pack.json entry filename aligned with zip contents.
-(cd "$OUT_DIR" && zip -q -X "$(basename "$ZIP")" pack.json wasm.json codex-websocket.wasm)
+(cd "$OUT_DIR" && zip -q -X -r "$(basename "$ZIP")" pack.json wasm.json halo-codex.wasm assets)
 
 echo "built: $ZIP"
 ls -lh "$ZIP" "$WASM_DST"

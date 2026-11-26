@@ -54,7 +54,7 @@ fn input_messages(messages: &[Value], include_instructions: bool) -> Result<(Str
                                 let value = url.get("url").unwrap_or(url);
                                 parts.push(json!({"type":"input_image","image_url":value,"detail":url["detail"].as_str().unwrap_or("auto")}));
                             }
-                            _ => return Err(Error::http(400, "Codex WebSocket 不支持该消息内容类型")),
+                            _ => return Err(Error::http(400, "Halo Codex 不支持该消息内容类型")),
                         }
                     }
                 }
@@ -67,7 +67,7 @@ fn input_messages(messages: &[Value], include_instructions: bool) -> Result<(Str
                     }
                 }
             }
-            _ => return Err(Error::http(400, "Codex WebSocket 不支持该消息角色")),
+            _ => return Err(Error::http(400, "Halo Codex 不支持该消息角色")),
         }
     }
     Ok((instructions.join("\n\n"), items))
@@ -97,7 +97,7 @@ fn request(body: &Value, session: &str, websocket: bool) -> Result<Value> {
             let mut function = tool["function"]
                 .as_object()
                 .cloned()
-                .ok_or_else(|| Error::http(400, "Codex WebSocket 当前支持 function 工具"))?;
+                .ok_or_else(|| Error::http(400, "Halo Codex 当前支持 function 工具"))?;
             function.insert("type".into(), json!("function"));
             converted.push(Value::Object(function));
         }
@@ -216,7 +216,7 @@ impl Stream<'_> {
                 class["status"].as_u64().unwrap_or(status as u64) as u16,
                 class["message"]
                     .as_str()
-                    .unwrap_or("Codex WebSocket 请求失败"),
+                    .unwrap_or("Halo Codex 请求失败"),
             )
             .with_code(err["code"].as_str().unwrap_or("codex_ws_error")));
         }
@@ -243,7 +243,7 @@ impl Stream<'_> {
                     match string(&event["response"]["incomplete_details"]["reason"]) {
                         "max_output_tokens" => "length",
                         "content_filter" => "content_filter",
-                        _ => return Err(Error::http(502, "Codex WebSocket 响应未完成")),
+                        _ => return Err(Error::http(502, "Halo Codex 响应未完成")),
                     }
                 } else if self.tools.is_empty() {
                     "stop"
@@ -346,11 +346,11 @@ fn forward_ws(
         let frame = socket.read()?;
         if frame["type"] != "text" {
             return Err(
-                Error::http(502, "Codex WebSocket 在完成前关闭").with_code("codex_ws_closed")
+                Error::http(502, "Halo Codex 在完成前关闭").with_code("codex_ws_closed")
             );
         }
         let event: Value = serde_json::from_str(string(&frame["data"]))
-            .map_err(|_| Error::http(502, "Codex WebSocket 返回无效事件"))?;
+            .map_err(|_| Error::http(502, "Halo Codex 返回无效事件"))?;
         if !started {
             sdk::stream_head(200)?;
             stream.emit(json!({"role":"assistant"}), Value::Null, None)?;

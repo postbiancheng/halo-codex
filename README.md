@@ -3,7 +3,7 @@
 Agent2API WASM 插件仓库：https://github.com/postbiancheng/halo-codex
 
 用 ChatGPT / Codex 订阅账号转发对话、查询用量与生成图片。  
-Provider id 暂为 `codex-websocket`（兼容已装账号）。
+Provider id：`halo-codex`。
 
 ## 能力
 
@@ -23,7 +23,7 @@ Provider id 暂为 `codex-websocket`（兼容已装账号）。
 ./scripts/pack.sh
 ```
 
-产物：`dist/agent2api-wasm-codex-websocket-<version>.zip`
+产物：`dist/agent2api-wasm-halo-codex-<version>.zip`（含 `assets/logo.svg` 图标）
 
 ## 安装
 
@@ -34,7 +34,7 @@ Provider id 暂为 `codex-websocket`（兼容已装账号）。
 python3 - <<'PY'
 import base64, json, urllib.request, os
 key = os.environ["AGENT2API_API_KEY"]
-zip_path = "dist/agent2api-wasm-codex-websocket-0.1.13.zip"
+zip_path = "dist/agent2api-wasm-halo-codex-0.2.0.zip"
 body = json.dumps({"packB64": base64.b64encode(open(zip_path, "rb").read()).decode()}).encode()
 req = urllib.request.Request(
     "http://127.0.0.1:3065/api/plugins/install",
@@ -52,3 +52,4 @@ PY
 - **0.1.11**：originator / 默认推理强度
 - **0.1.12**：错误分类与重试（上游强制 `store=false`，暂无 previous_response_id 会话链）
 - **0.1.13**：图片生成/编辑
+- **0.2.0**：更名 Halo Codex（provider `halo-codex`），接入 OpenAI 风格 SVG 图标

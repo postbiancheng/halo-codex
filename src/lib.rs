@@ -9,7 +9,7 @@ mod usage;
 use agent2api_wasm_sdk::{self as sdk, json, Error, Result, Value};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 
-const PROVIDER: &str = "codex-websocket";
+const PROVIDER: &str = "halo-codex";
 
 sdk::export_provider!(handle);
 
@@ -24,7 +24,7 @@ fn login_methods() -> Value {
 
 fn metadata() -> Value {
     json!({
-        "id": PROVIDER, "label": "Codex WebSocket", "order": 46,
+        "id": PROVIDER, "label": "Halo Codex", "order": 46,
         "capabilities": {"chat": true, "stateful": true, "supports_default_model": false,
             "web_login":true,"refresh":true,"refresh_uses_account":true,"usage":true,
             "model_refresh":true,"images":true},
@@ -37,7 +37,7 @@ fn metadata() -> Value {
         },
         "default_models": models::fallback(),
         "settings_schema": config::schema(),
-        "settings_group": { "label": "Codex WebSocket" }
+        "settings_group": { "label": "Halo Codex" }
     })
 }
 
@@ -69,7 +69,7 @@ fn normalize_access(access: &str) -> Result<Value> {
 
 fn public(secret: &Value) -> Value {
     json!({
-        "name": "Codex WebSocket",
+        "name": "Halo Codex",
         "accountId": secret["accountId"],
         "expiresAt": secret["expiresAt"],
         "tokenExpiresAt": secret["expiresAt"]

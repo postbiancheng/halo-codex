@@ -1,11 +1,13 @@
 {
-  "id": "agent2api-wasm-codex-websocket",
-  "name": "Codex WebSocket",
-  "description": "Codex 订阅的 WebSocket 对话与用量查询",
-  "version": "0.1.13",
+  "id": "agent2api-wasm-halo-codex",
+  "name": "Halo Codex",
+  "description": "Codex 订阅的 WebSocket 对话、用量查询与图片生成",
+  "version": "0.2.0",
   "protocol": 1,
   "providers": [
-    { "id": "codex-websocket", "label": "Codex WebSocket", "order": 46, "default_enabled": true }
+    { "id": "halo-codex", "label": "Halo Codex", "order": 46, "default_enabled": true }
   ],
-  "entry": { "wasm32-unknown-unknown": "codex-websocket.wasm" }
+  "entry": { "wasm32-unknown-unknown": "halo-codex.wasm" },
+  "icons": "assets",
+  "homepage": "https://github.com/postbiancheng/halo-codex"
 }

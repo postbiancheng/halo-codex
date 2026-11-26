@@ -12,7 +12,7 @@ pub const REASONING_AUTO: &str = "auto";
 pub fn schema() -> Value {
     json!({
         "version": 1,
-        "title": "Codex WebSocket 设置",
+        "title": "Halo Codex 设置",
         "description": "控制对话转发、客户端身份与默认推理强度；模型列表在登录后从 Codex 目录读取。",
         "runtime_overrides": false,
         "fields": [
