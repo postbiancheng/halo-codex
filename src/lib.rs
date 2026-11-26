@@ -30,8 +30,6 @@ fn metadata() -> Value {
             "model_refresh":true,"images":true},
         "account_features": {
             "usage": true,
-            "credit_detail": true,
-            "credit_expiry": true,
             "identifier": ["accountId"],
             "expiry": ["expiresAt", "tokenExpiresAt"]
         },

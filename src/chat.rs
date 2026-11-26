@@ -21,10 +21,99 @@ fn text(value: &Value) -> String {
     }
 }
 
+fn tool_name_ok(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, b'_' | b'.' | b'-'))
+}
+
+fn require_tool_name(value: Option<&Value>) -> Result<&str> {
+    let name = value.and_then(Value::as_str).unwrap_or("").trim();
+    if tool_name_ok(name) {
+        Ok(name)
+    } else {
+        Err(Error::http(
+            400,
+            "Codex 工具名称只能包含英文字母、数字、下划线、点和连字符",
+        ))
+    }
+}
+
+fn convert_tools(tools: &[Value]) -> Result<Vec<Value>> {
+    let mut converted = Vec::with_capacity(tools.len());
+    for tool in tools {
+        let kind = string(&tool["type"]);
+        match kind {
+            "" | "function" if tool.get("function").is_some_and(Value::is_object) => {
+                let mut function = tool["function"]
+                    .as_object()
+                    .cloned()
+                    .ok_or_else(|| Error::http(400, "Halo Codex function 工具缺少定义"))?;
+                require_tool_name(function.get("name"))?;
+                function.insert("type".into(), json!("function"));
+                converted.push(Value::Object(function));
+            }
+            "" | "function" => {
+                require_tool_name(tool.get("name"))?;
+                let mut native = tool.clone();
+                native["type"] = json!("function");
+                converted.push(native);
+            }
+            "custom" | "namespace" => {
+                require_tool_name(tool.get("name"))?;
+                converted.push(tool.clone());
+            }
+            "web_search" => converted.push(tool.clone()),
+            _ => {
+                return Err(Error::http(
+                    400,
+                    format!("Halo Codex 不支持工具类型 {kind}"),
+                ));
+            }
+        }
+    }
+    Ok(converted)
+}
+
+fn convert_tool_choice(choice: &Value) -> Value {
+    if choice.is_object() {
+        let name = choice
+            .pointer("/function/name")
+            .or_else(|| choice.get("name"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        json!({"type":"function","name":name})
+    } else {
+        choice.clone()
+    }
+}
+
+fn passthrough_input_item(message: &Value) -> Option<Value> {
+    let kind = string(&message["type"]);
+    matches!(
+        kind,
+        "message"
+            | "function_call"
+            | "function_call_output"
+            | "custom_tool_call"
+            | "custom_tool_call_output"
+            | "web_search_call"
+            | "local_shell_call"
+            | "local_shell_call_output"
+            | "additional_tools"
+    )
+    .then(|| message.clone())
+}
+
 fn input_messages(messages: &[Value], include_instructions: bool) -> Result<(String, Vec<Value>)> {
     let mut instructions = Vec::new();
     let mut items = Vec::new();
     for message in messages {
+        if let Some(item) = passthrough_input_item(message) {
+            items.push(item);
+            continue;
+        }
         let role = string(&message["role"]);
         let content = &message["content"];
         match role {
@@ -33,7 +122,19 @@ fn input_messages(messages: &[Value], include_instructions: bool) -> Result<(Str
                     instructions.push(text(content));
                 }
             }
-            "tool" => items.push(json!({"type":"function_call_output", "call_id":message["tool_call_id"],"output":text(content)})),
+            "tool" => {
+                let call_id = message
+                    .get("tool_call_id")
+                    .or_else(|| message.get("call_id"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                let kind = if string(&message["type"]) == "custom_tool_call_output" {
+                    "custom_tool_call_output"
+                } else {
+                    "function_call_output"
+                };
+                items.push(json!({"type":kind,"call_id":call_id,"output":text(content)}));
+            }
             "assistant" | "user" => {
                 let kind = if role == "assistant" {
                     "output_text"
@@ -63,7 +164,23 @@ fn input_messages(messages: &[Value], include_instructions: bool) -> Result<(Str
                 }
                 if role == "assistant" {
                     for call in message["tool_calls"].as_array().into_iter().flatten() {
-                        items.push(json!({"type":"function_call","call_id":call["id"],"name":call["function"]["name"],"arguments":call["function"]["arguments"]}));
+                        let call_type = string(&call["type"]);
+                        if call_type == "custom" || call.get("custom").is_some_and(Value::is_object) {
+                            let custom = call.get("custom").unwrap_or(call);
+                            items.push(json!({
+                                "type":"custom_tool_call",
+                                "call_id": call.get("id").cloned().unwrap_or(Value::Null),
+                                "name": custom.get("name").cloned().unwrap_or(Value::Null),
+                                "input": custom.get("input").or_else(|| custom.get("arguments")).cloned().unwrap_or(json!("")),
+                            }));
+                        } else {
+                            items.push(json!({
+                                "type":"function_call",
+                                "call_id": call.get("id").cloned().unwrap_or(Value::Null),
+                                "name": call.pointer("/function/name").cloned().unwrap_or(Value::Null),
+                                "arguments": call.pointer("/function/arguments").cloned().unwrap_or(json!("")),
+                            }));
+                        }
                     }
                 }
             }
@@ -74,9 +191,24 @@ fn input_messages(messages: &[Value], include_instructions: bool) -> Result<(Str
 }
 
 fn input(body: &Value) -> Result<(String, Vec<Value>)> {
+    if let Some(items) = body["input"].as_array() {
+        let instructions = body["instructions"].as_str().unwrap_or("").to_string();
+        let mut normalized = Vec::with_capacity(items.len());
+        for item in items {
+            if let Some(pass) = passthrough_input_item(item) {
+                normalized.push(pass);
+            } else if item.get("role").is_some() {
+                let (_ignored, mut rows) = input_messages(std::slice::from_ref(item), false)?;
+                normalized.append(&mut rows);
+            } else {
+                return Err(Error::http(400, "Halo Codex input 条目缺少有效 type"));
+            }
+        }
+        return Ok((instructions, normalized));
+    }
     let messages = body["messages"]
         .as_array()
-        .ok_or_else(|| Error::http(400, "缺少 messages"))?;
+        .ok_or_else(|| Error::http(400, "缺少 messages 或 input"))?;
     input_messages(messages, true)
 }
 
@@ -92,23 +224,10 @@ fn request(body: &Value, session: &str, websocket: bool) -> Result<Value> {
             "input":items,"stream":true,"store":false,"parallel_tool_calls":true})
     };
     if let Some(tools) = body["tools"].as_array() {
-        let mut converted = Vec::new();
-        for tool in tools {
-            let mut function = tool["function"]
-                .as_object()
-                .cloned()
-                .ok_or_else(|| Error::http(400, "Halo Codex 当前支持 function 工具"))?;
-            function.insert("type".into(), json!("function"));
-            converted.push(Value::Object(function));
-        }
-        output["tools"] = json!(converted);
+        output["tools"] = json!(convert_tools(tools)?);
     }
     if let Some(choice) = body.get("tool_choice") {
-        output["tool_choice"] = if choice.is_object() {
-            json!({"type":"function","name":choice["function"]["name"]})
-        } else {
-            choice.clone()
-        };
+        output["tool_choice"] = convert_tool_choice(choice);
     }
     if let Some(value) = body.get("parallel_tool_calls") {
         output["parallel_tool_calls"] = value.clone();
@@ -157,7 +276,9 @@ impl Stream<'_> {
         let key = event["output_index"].as_u64().unwrap_or(0);
         if declaration {
             let item = &event["item"];
-            if item["type"] != "function_call" || self.tools.contains_key(&key) {
+            let kind = string(&item["type"]);
+            if !matches!(kind, "function_call" | "custom_tool_call") || self.tools.contains_key(&key)
+            {
                 return Ok(());
             }
             let index = self.tools.len();
@@ -184,7 +305,10 @@ impl Stream<'_> {
             delta
         } else if !tool.saw_delta {
             tool.saw_delta = true;
-            string(&item["arguments"])
+            item["arguments"]
+                .as_str()
+                .or_else(|| item["input"].as_str())
+                .unwrap_or("")
         } else {
             ""
         };
@@ -232,9 +356,9 @@ impl Stream<'_> {
                 )?;
             }
             "response.output_item.added" => self.tool(event, true)?,
-            "response.output_item.done" | "response.function_call_arguments.delta" => {
-                self.tool(event, false)?
-            }
+            "response.output_item.done"
+            | "response.function_call_arguments.delta"
+            | "response.custom_tool_call_input.delta" => self.tool(event, false)?,
             "response.completed" | "response.incomplete" => {
                 let u = &event["response"]["usage"];
                 let usage = u.is_object().then(|| json!({"prompt_tokens":u["input_tokens"],"completion_tokens":u["output_tokens"],
@@ -461,4 +585,50 @@ mod tests {
         assert_eq!(output["reasoning"]["effort"], "max");
     }
 
+    #[test]
+    fn converts_openai_and_native_tools() {
+        let tools = convert_tools(&[
+            json!({"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}),
+            json!({"type":"web_search","external_web_access":false}),
+            json!({"type":"custom","name":"shell.exec","description":"run"}),
+        ])
+        .unwrap();
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["name"], "lookup");
+        assert_eq!(tools[1]["type"], "web_search");
+        assert_eq!(tools[2]["type"], "custom");
+        assert!(convert_tools(&[json!({"type":"function","function":{"name":"坏名"}})]).is_err());
+    }
+
+    #[test]
+    fn accepts_native_input_and_tool_results() {
+        let (instructions, items) = input(&json!({
+            "instructions": "be brief",
+            "input": [
+                {"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+                {"type":"function_call","call_id":"c1","name":"lookup","arguments":"{}"},
+                {"type":"function_call_output","call_id":"c1","output":"ok"}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(instructions, "be brief");
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[1]["type"], "function_call");
+        assert_eq!(items[2]["type"], "function_call_output");
+
+        let (_, chat_items) = input_messages(
+            &[
+                json!({"role":"assistant","content":"","tool_calls":[
+                    {"id":"c2","type":"function","function":{"name":"lookup","arguments":"{}"}},
+                    {"id":"c3","type":"custom","custom":{"name":"shell.exec","input":"ls"}}
+                ]}),
+                json!({"role":"tool","tool_call_id":"c2","content":"done"}),
+            ],
+            true,
+        )
+        .unwrap();
+        assert_eq!(chat_items[0]["type"], "function_call");
+        assert_eq!(chat_items[1]["type"], "custom_tool_call");
+        assert_eq!(chat_items[2]["type"], "function_call_output");
+    }
 }

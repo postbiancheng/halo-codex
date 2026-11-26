@@ -12,7 +12,7 @@ Provider id：`halo-codex`。
 | 登录 | 设备授权 OAuth，或导入 access token |
 | 模型 | 登录后 `GET /codex/models` 拉取；失败回退内置默认 |
 | 对话 | 默认 WebSocket；可切 HTTP SSE |
-| 用量 | `/wham/usage` + `/subscriptions`（含套餐到期） |
+| 用量 | 仅订阅窗口（`/wham/usage` rate_limit + `/subscriptions` 到期）；不统计额外点数 |
 | 图片 | `gpt-image-2` / `gpt-image-1.5` → `/codex/images/generations\|edits` |
 | 设置 | 转发方式、clientVersion、originator、默认推理强度 |
 | 错误 | classify / retry.decision：鉴权失效、额度/限流、内容策略 |
@@ -34,7 +34,7 @@ Provider id：`halo-codex`。
 python3 - <<'PY'
 import base64, json, urllib.request, os
 key = os.environ["AGENT2API_API_KEY"]
-zip_path = "dist/agent2api-wasm-halo-codex-0.2.1.zip"
+zip_path = "dist/agent2api-wasm-halo-codex-0.2.2.zip"
 body = json.dumps({"packB64": base64.b64encode(open(zip_path, "rb").read()).decode()}).encode()
 req = urllib.request.Request(
     "http://127.0.0.1:3065/api/plugins/install",
@@ -54,3 +54,4 @@ PY
 - **0.1.13**：图片生成/编辑
 - **0.2.0**：更名 Halo Codex（provider `halo-codex`），接入 OpenAI 风格 SVG 图标
 - **0.2.1**：宿主控制面补齐（`is_error_response` / `refusal_markers` / `quota.sources`）、真实 `reasoning_patch`、`error_rules`
+- **0.2.2**：用量改为仅订阅窗口（忽略额外点数）；工具支持 function / custom / web_search / namespace 与原生 `input`
