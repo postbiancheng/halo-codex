@@ -38,10 +38,13 @@ export AGENT2API_API_KEY=...   # 或写入 ~/.agent2api/config.json 的 apiKey
 ## 工程化
 
 - 本地：`cargo test`、`cargo fmt --check`、`cargo clippy --target wasm32-unknown-unknown -- -D warnings`、`./scripts/pack.sh`
-- GitHub Actions：`.github/workflows/ci.yml`（push/PR）、`release.yml`（tag `v*` 发 Release + zip/sha256）
+- GitHub Actions 草稿在本地 `.github/workflows/`（`ci.yml` / `release.yml`）；推送需 token 带 `workflow` scope
 - 发版：改 `Cargo.toml` + `pack.json` 版本 → push → `git tag vX.Y.Z && git push origin vX.Y.Z`
 
-> 首次推送 workflow 文件需要 GitHub token 带 `workflow` scope：`gh auth refresh -h github.com -s workflow`
+```bash
+gh auth refresh -h github.com -s workflow
+git add .github/workflows && git commit -m "Add CI and release workflows." && git push
+```
 
 ## 版本摘要
 
