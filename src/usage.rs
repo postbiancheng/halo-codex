@@ -6,11 +6,13 @@ use agent2api_wasm_sdk::{self as sdk, http, json, Error, Result, Value};
 
 fn headers(access: &str, account: &str) -> Value {
     let originator = config::originator(false).unwrap_or_else(|_| config::DEFAULT_ORIGINATOR.into());
+    let user_agent =
+        config::user_agent(false).unwrap_or_else(|_| format!("codex_cli_rs/{}", config::DEFAULT_CLIENT_VERSION));
     json!({
         "Authorization": format!("Bearer {access}"),
         "ChatGPT-Account-Id": account,
         "originator": originator,
-        "User-Agent": concat!("Halo-Codex/", env!("CARGO_PKG_VERSION")),
+        "User-Agent": user_agent,
         "Accept": "application/json",
     })
 }

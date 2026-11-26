@@ -34,7 +34,7 @@ Provider id：`halo-codex`。
 python3 - <<'PY'
 import base64, json, urllib.request, os
 key = os.environ["AGENT2API_API_KEY"]
-zip_path = "dist/agent2api-wasm-halo-codex-0.2.5.zip"
+zip_path = "dist/agent2api-wasm-halo-codex-0.2.6.zip"
 body = json.dumps({"packB64": base64.b64encode(open(zip_path, "rb").read()).decode()}).encode()
 req = urllib.request.Request(
     "http://127.0.0.1:3065/api/plugins/install",
@@ -58,3 +58,4 @@ PY
 - **0.2.3**：加密推理 `include`、web_search 自动声明、拒绝无状态历史字段、过长 call_id 哈希（本地已备 CI workflow，推送需 `workflow` 授权）
 - **0.2.4**：目录补齐 serviceTiers/图片能力；私有 profile 回退 base_instructions 与 verbosity；HTTP `responses=experimental`；订阅配额错误码对齐
 - **0.2.5**：恢复额外点数兜底；`prompt_cache_key` 最长 512；空 `tool_choice` 不再下发
+- **0.2.6**：图片/对话冷却隔离；账号显示 JWT 邮箱；统一 `User-Agent`；有 tools 时默认 `tool_choice=auto`；授权失败带上游错误正文

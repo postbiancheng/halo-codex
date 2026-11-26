@@ -163,7 +163,6 @@ pub fn refresh(params: &Value) -> Result<Value> {
         .ok_or_else(|| Error::http(401, "Codex 凭据缺少账号标识"))?;
     let client_version = config::client_version()?;
     let originator = config::originator(false)?;
-    let user_agent = format!("{originator}/{client_version}");
     let url = format!(
         "https://chatgpt.com/backend-api/codex/models?client_version={client_version}"
     );
@@ -174,7 +173,8 @@ pub fn refresh(params: &Value) -> Result<Value> {
             "Authorization": format!("Bearer {access}"),
             "ChatGPT-Account-Id": account_id,
             "originator": originator,
-            "User-Agent": user_agent,
+            "User-Agent": config::user_agent(false)?,
+            "version": client_version,
             "Accept": "application/json",
         }),
         None,
@@ -410,6 +410,46 @@ fn catalog_levels_for(model: &str) -> Option<Vec<String>> {
         })
 }
 
+/// Host quota cooldown list. Image and chat buckets stay isolated.
+pub fn cooldown_models(params: &Value) -> Value {
+    let model = params["model"]
+        .as_str()
+        .or_else(|| params["wire_model"].as_str())
+        .unwrap_or("")
+        .trim();
+    if images::is_model(model) {
+        return json!({ "models": [model] });
+    }
+    let mut cooled = Vec::new();
+    let catalog = sdk::account()
+        .ok()
+        .and_then(|account| cached_for(&account["secret"]))
+        .or_else(|| {
+            sdk::catalog::cached()
+                .ok()
+                .filter(|value| value["models"].is_array())
+        });
+    if let Some(catalog) = catalog {
+        for row in catalog["models"].as_array().into_iter().flatten() {
+            let Some(id) = row["id"].as_str() else {
+                continue;
+            };
+            if images::is_model(id) || row["kind"] == "image" {
+                continue;
+            }
+            cooled.push(Value::String(id.to_string()));
+        }
+    }
+    if !model.is_empty()
+        && !cooled
+            .iter()
+            .any(|value| value.as_str() == Some(model))
+    {
+        cooled.push(Value::String(model.to_string()));
+    }
+    json!({ "models": cooled })
+}
+
 /// Host model-rule binding → inject `reasoning_effort` / `reasoning.effort`.
 pub fn reasoning_patch(params: &Value) -> Value {
     let body = &params["body"];
@@ -527,6 +567,20 @@ mod tests {
         assert_eq!(profiles["gpt-6.2-sol"]["defaultVerbosity"], "medium");
         assert_eq!(models[1]["id"], "gpt-6-luna");
         assert_eq!(models[1]["name"], "Luna");
+    }
+
+    #[test]
+    fn cooldown_isolates_image_from_chat() {
+        let image = cooldown_models(&json!({ "model": "gpt-image-1.5" }));
+        assert_eq!(image["models"], json!(["gpt-image-1.5"]));
+
+        let chat = cooldown_models(&json!({ "wire_model": "gpt-5.1-codex" }));
+        assert_eq!(chat["models"], json!(["gpt-5.1-codex"]));
+        assert!(!chat["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value.as_str() == Some("gpt-image-1.5")));
     }
 
     #[test]

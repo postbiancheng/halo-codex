@@ -33,10 +33,14 @@ pub fn catalog_rows() -> Vec<Value> {
         .collect()
 }
 
-fn supported(model: &str) -> bool {
+pub fn is_model(model: &str) -> bool {
     MODELS
         .iter()
         .any(|(id, _)| id.eq_ignore_ascii_case(model))
+}
+
+fn supported(model: &str) -> bool {
+    is_model(model)
 }
 
 fn uncertain(message: &str) -> Error {
@@ -80,7 +84,8 @@ fn headers(secret: &Value) -> Result<Value> {
         "ChatGPT-Account-Id": account,
         "chatgpt-account-id": account,
         "originator": originator,
-        "User-Agent": format!("{originator}/{version}"),
+        "User-Agent": config::user_agent(false)?,
+        "version": version,
         "Accept": "application/json",
         "Content-Type": "application/json",
         "x-client-request-id": format!("img_{request_id}"),

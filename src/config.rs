@@ -102,6 +102,15 @@ pub fn originator(for_chat: bool) -> Result<String> {
     }))
 }
 
+pub fn user_agent(for_chat: bool) -> Result<String> {
+    let originator = originator(for_chat)?;
+    let version = client_version()?;
+    Ok(format!(
+        "{originator}/{version} Halo-Codex/{}",
+        env!("CARGO_PKG_VERSION")
+    ))
+}
+
 pub fn reasoning_effort() -> Result<Option<String>> {
     let value = sdk::settings::get("reasoningEffort")?;
     Ok(match value.as_str().map(str::trim).unwrap_or("") {

@@ -18,6 +18,28 @@ fn put(snapshot: &state::Snapshot, value: Value, ttl: i64) -> Result<()> {
     }
 }
 
+fn auth_error_detail(body: &Value) -> Option<String> {
+    body.get("error")
+        .and_then(|error| {
+            error
+                .as_str()
+                .or_else(|| error.get("message").and_then(Value::as_str))
+                .or_else(|| error.get("code").and_then(Value::as_str))
+        })
+        .or_else(|| body.get("error_description").and_then(Value::as_str))
+        .or_else(|| body.get("message").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 160)
+        .map(str::to_owned)
+}
+
+fn auth_http_error(status: u16, fallback: &str, body: &Value) -> Error {
+    match auth_error_detail(body) {
+        Some(detail) => Error::http(status, format!("{fallback}：{detail}")),
+        None => Error::http(status, fallback),
+    }
+}
+
 fn post_json(url: &str, value: Value) -> Result<(u16, Value)> {
     let response = http::open(
         "POST",
@@ -26,11 +48,8 @@ fn post_json(url: &str, value: Value) -> Result<(u16, Value)> {
         Some(&value),
     )?;
     let status = response.status;
-    if (200..300).contains(&status) {
-        Ok((status, response.json()?))
-    } else {
-        Ok((status, Value::Null))
-    }
+    let body = response.json().unwrap_or(Value::Null);
+    Ok((status, body))
 }
 
 pub fn start(params: &Value) -> Result<Value> {
@@ -46,7 +65,7 @@ pub fn start(params: &Value) -> Result<Value> {
         json!({"client_id":CLIENT}),
     )?;
     if !(200..300).contains(&status) {
-        return Err(Error::http(status, "获取 Codex 设备验证码失败"));
+        return Err(auth_http_error(status, "获取 Codex 设备验证码失败", &reply));
     }
     let device = reply["device_auth_id"]
         .as_str()
@@ -111,7 +130,7 @@ pub fn poll() -> Result<Value> {
     }
     put(&reserved, Value::Null, 1000)?;
     if !(200..300).contains(&status) {
-        return Err(Error::http(status, "查询 Codex 授权失败"));
+        return Err(auth_http_error(status, "查询 Codex 授权失败", &reply));
     }
     let code = reply["authorization_code"]
         .as_str()
@@ -135,11 +154,12 @@ pub fn poll() -> Result<Value> {
         json!({"Content-Type":"application/x-www-form-urlencoded"}),
         Some(form.as_bytes()),
     )?;
-    if !(200..300).contains(&response.status) {
-        return Err(Error::http(response.status, "换取 Codex 登录凭据失败"));
+    let status = response.status;
+    let body = response.json().unwrap_or(Value::Null);
+    if !(200..300).contains(&status) {
+        return Err(auth_http_error(status, "换取 Codex 登录凭据失败", &body));
     }
-    let tokens = response.json()?;
-    Ok(login::done(super::normalized(from_tokens(&tokens, None)?)))
+    Ok(login::done(super::normalized(from_tokens(&body, None)?)))
 }
 
 pub fn cancel() -> Result<Value> {
@@ -195,7 +215,11 @@ pub fn credentials(force: bool) -> Result<Value> {
         json!({"grant_type":"refresh_token","client_id":CLIENT,"refresh_token":token}),
     )?;
     if !(200..300).contains(&status) {
-        return Err(Error::http(status, "Codex 登录续期失败，请重新授权"));
+        return Err(auth_http_error(
+            status,
+            "Codex 登录续期失败，请重新授权",
+            &tokens,
+        ));
     }
     let new = from_tokens(&tokens, Some(current))?;
     if new["identity"] != current["identity"] {

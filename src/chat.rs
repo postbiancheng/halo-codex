@@ -417,6 +417,12 @@ fn request(body: &Value, session: &str, websocket: bool) -> Result<Value> {
     apply_catalog_defaults(body, &mut instructions, &mut output);
     if let Some(tools) = body["tools"].as_array() {
         output["tools"] = json!(convert_tools(tools)?);
+        if body
+            .get("tool_choice")
+            .map_or(true, |choice| choice.as_str() == Some(""))
+        {
+            output["tool_choice"] = json!("auto");
+        }
     }
     if let Some(choice) = body.get("tool_choice") {
         if choice.as_str() != Some("") {
@@ -626,7 +632,7 @@ fn auth_headers(secret: &Value, request_id: &str, websocket: bool) -> Result<Val
         "chatgpt-account-id": account,
         "ChatGPT-Account-Id": account,
         "originator": originator,
-        "User-Agent": format!("{originator}/{version}"),
+        "User-Agent": config::user_agent(true)?,
         "version": version,
         "session-id": request_id,
         "thread-id": request_id,

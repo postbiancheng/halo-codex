@@ -63,14 +63,33 @@ fn normalize_access(access: &str) -> Result<Value> {
         .and_then(Value::as_str)
         .or_else(|| claims["sub"].as_str())
         .unwrap_or(account);
-    Ok(
-        json!({"accessToken": access, "accountId": account, "expiresAt": expires,"identity":format!("{account}:{user}")}),
-    )
+    let display = [
+        claims.get("email").and_then(Value::as_str),
+        claims.get("preferred_username").and_then(Value::as_str),
+        claims
+            .pointer("/https:~1~1api.openai.com~1profile/email")
+            .and_then(Value::as_str),
+        claims
+            .pointer("/https:~1~1api.openai.com~1auth/user_email")
+            .and_then(Value::as_str),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .find(|value| !value.is_empty())
+    .unwrap_or("Halo Codex");
+    Ok(json!({
+        "accessToken": access,
+        "accountId": account,
+        "expiresAt": expires,
+        "identity": format!("{account}:{user}"),
+        "displayName": display
+    }))
 }
 
 fn public(secret: &Value) -> Value {
     json!({
-        "name": "Halo Codex",
+        "name": secret["displayName"].as_str().filter(|value| !value.is_empty()).unwrap_or("Halo Codex"),
         "accountId": secret["accountId"],
         "expiresAt": secret["expiresAt"],
         "tokenExpiresAt": secret["expiresAt"]
@@ -139,7 +158,7 @@ fn handle(method: &str, mut params: Value) -> Result<Value> {
         "reasoning_patch" => Ok(models::reasoning_patch(&params)),
         "is_error_response" => Ok(json!(errors::is_error_response(&params))),
         "refusal_markers" => Ok(json!({ "finishes": ["content_filter"], "markers": [] })),
-        "cooldown_models" => Ok(json!({ "models": [] })),
+        "cooldown_models" => Ok(models::cooldown_models(&params)),
         "classify" => Ok(errors::classify(status(&params), &params["body"])),
         "error.policy" => Ok(errors::policy(status(&params), &params["body"])),
         "retry.decision" => Ok(errors::retry(&params)),
