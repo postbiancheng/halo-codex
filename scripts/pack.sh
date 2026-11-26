@@ -34,6 +34,8 @@ fi
 "$CARGO" build --release --target wasm32-unknown-unknown
 
 mkdir -p "$OUT_DIR"
+# Drop stale local packs so dist/ only keeps the current version.
+find "$OUT_DIR" -maxdepth 1 -type f \( -name '*.zip' -o -name '*.sha256' -o -name '*.wasm' \) -delete
 cp -f "$WASM_SRC" "$WASM_DST"
 cp -f pack.json wasm.json "$OUT_DIR/"
 rm -rf "${OUT_DIR}/assets"
