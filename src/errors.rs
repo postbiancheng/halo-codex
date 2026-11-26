@@ -30,7 +30,12 @@ fn code_text(body: &Value) -> String {
     ]
     .into_iter()
     .flatten()
-    .find_map(|value| value.as_str().map(str::trim).filter(|text| !text.is_empty()))
+    .find_map(|value| {
+        value
+            .as_str()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+    })
     .unwrap_or("")
     .to_ascii_lowercase()
 }
@@ -143,8 +148,13 @@ pub fn classify(status: u16, body: &Value) -> Value {
 
     if quota {
         let transient = status == 429
-            && !["insufficient_quota", "quota_exceeded", "billing_not_active", "usage_limit_exceeded"]
-                .contains(&code.as_str())
+            && ![
+                "insufficient_quota",
+                "quota_exceeded",
+                "billing_not_active",
+                "usage_limit_exceeded",
+            ]
+            .contains(&code.as_str())
             && !lower.contains("insufficient quota")
             && !lower.contains("usage limit");
         return json!({
@@ -265,11 +275,7 @@ pub fn is_error_response(params: &Value) -> bool {
         return true;
     }
     let content_type = header(params, "content-type");
-    let mime = content_type
-        .split(';')
-        .next()
-        .unwrap_or("")
-        .trim();
+    let mime = content_type.split(';').next().unwrap_or("").trim();
     if mime.eq_ignore_ascii_case("application/json") {
         return true;
     }
@@ -285,10 +291,16 @@ mod tests {
 
     #[test]
     fn classifies_auth_and_quota() {
-        let auth = classify(401, &json!({"error":{"message":"Unauthorized","code":"invalid_api_key"}}));
+        let auth = classify(
+            401,
+            &json!({"error":{"message":"Unauthorized","code":"invalid_api_key"}}),
+        );
         assert_eq!(auth["kind"], "token_expired");
 
-        let quota = classify(429, &json!({"error":{"message":"Rate limit exceeded","code":"rate_limit_exceeded"}}));
+        let quota = classify(
+            429,
+            &json!({"error":{"message":"Rate limit exceeded","code":"rate_limit_exceeded"}}),
+        );
         assert_eq!(quota["kind"], "quota_limited");
         assert!(quota.get("reset_at").is_some());
 

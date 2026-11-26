@@ -95,11 +95,14 @@ pub fn originator(for_chat: bool) -> Result<String> {
             DEFAULT_ORIGINATOR.into()
         });
     }
-    Ok(sanitize_token(trimmed, if for_chat {
-        DEFAULT_CHAT_ORIGINATOR
-    } else {
-        DEFAULT_ORIGINATOR
-    }))
+    Ok(sanitize_token(
+        trimmed,
+        if for_chat {
+            DEFAULT_CHAT_ORIGINATOR
+        } else {
+            DEFAULT_ORIGINATOR
+        },
+    ))
 }
 
 pub fn user_agent(for_chat: bool) -> Result<String> {
@@ -115,7 +118,12 @@ pub fn reasoning_effort() -> Result<Option<String>> {
     let value = sdk::settings::get("reasoningEffort")?;
     Ok(match value.as_str().map(str::trim).unwrap_or("") {
         "" | REASONING_AUTO => None,
-        effort if matches!(effort, "minimal" | "low" | "medium" | "high" | "xhigh" | "max") => {
+        effort
+            if matches!(
+                effort,
+                "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+            ) =>
+        {
             Some(effort.into())
         }
         _ => None,

@@ -109,11 +109,10 @@ fn normalize_native_item(mut item: Value) -> Result<Option<Value>> {
         .unwrap_or("message")
         .to_string();
     if kind == "item_reference" {
-        return Err(Error::http(
-            400,
-            "Codex 订阅不保存历史引用，请发送完整历史条目",
-        )
-        .with_code("codex_stateless_history_required"));
+        return Err(
+            Error::http(400, "Codex 订阅不保存历史引用，请发送完整历史条目")
+                .with_code("codex_stateless_history_required"),
+        );
     }
     if kind == "reasoning" {
         let encrypted = fields
@@ -201,9 +200,11 @@ fn ensure_encrypted_include(output: &mut Value) {
             .entry("summary".to_string())
             .or_insert_with(|| json!("auto"));
     }
-    let include = output
-        .as_object_mut()
-        .map(|fields| fields.entry("include".to_string()).or_insert_with(|| json!([])));
+    let include = output.as_object_mut().map(|fields| {
+        fields
+            .entry("include".to_string())
+            .or_insert_with(|| json!([]))
+    });
     let Some(Value::Array(include)) = include else {
         return;
     };
@@ -328,7 +329,8 @@ fn input_messages(messages: &[Value], include_instructions: bool) -> Result<(Str
                             .map(shorten_call_id)
                             .map(Value::String)
                             .unwrap_or(Value::Null);
-                        if call_type == "custom" || call.get("custom").is_some_and(Value::is_object) {
+                        if call_type == "custom" || call.get("custom").is_some_and(Value::is_object)
+                        {
                             let custom = call.get("custom").unwrap_or(call);
                             items.push(json!({
                                 "type":"custom_tool_call",
@@ -384,7 +386,10 @@ fn apply_catalog_defaults(body: &Value, instructions: &mut String, output: &mut 
         return;
     };
     if instructions.trim().is_empty() {
-        if let Some(base) = profile["baseInstructions"].as_str().filter(|value| !value.is_empty()) {
+        if let Some(base) = profile["baseInstructions"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+        {
             *instructions = base.to_string();
             output["instructions"] = json!(base);
         }
@@ -419,7 +424,7 @@ fn request(body: &Value, session: &str, websocket: bool) -> Result<Value> {
         output["tools"] = json!(convert_tools(tools)?);
         if body
             .get("tool_choice")
-            .map_or(true, |choice| choice.as_str() == Some(""))
+            .is_none_or(|choice| choice.as_str() == Some(""))
         {
             output["tool_choice"] = json!("auto");
         }
@@ -487,7 +492,8 @@ impl Stream<'_> {
         if declaration {
             let item = &event["item"];
             let kind = string(&item["type"]);
-            if !matches!(kind, "function_call" | "custom_tool_call") || self.tools.contains_key(&key)
+            if !matches!(kind, "function_call" | "custom_tool_call")
+                || self.tools.contains_key(&key)
             {
                 return Ok(());
             }
@@ -548,9 +554,7 @@ impl Stream<'_> {
             let class = errors::classify(status, err);
             return Err(Error::http(
                 class["status"].as_u64().unwrap_or(status as u64) as u16,
-                class["message"]
-                    .as_str()
-                    .unwrap_or("Halo Codex 请求失败"),
+                class["message"].as_str().unwrap_or("Halo Codex 请求失败"),
             )
             .with_code(err["code"].as_str().unwrap_or("codex_ws_error")));
         }
@@ -650,11 +654,7 @@ fn session_key(body: &Value, params: &Value) -> String {
     body["prompt_cache_key"]
         .as_str()
         .or_else(|| params["session"].as_str())
-        .filter(|s| {
-            !s.is_empty()
-                && s.len() <= 512
-                && s.bytes().all(|v| v.is_ascii_graphic())
-        })
+        .filter(|s| !s.is_empty() && s.len() <= 512 && s.bytes().all(|v| v.is_ascii_graphic()))
         .map(str::to_owned)
         .unwrap_or_default()
 }
@@ -693,12 +693,7 @@ pub fn forward(body: Value, params: &Value, secret: &Value) -> Result<()> {
     }
 }
 
-fn forward_ws(
-    body: Value,
-    session: &str,
-    headers: Value,
-    stream: &mut Stream<'_>,
-) -> Result<()> {
+fn forward_ws(body: Value, session: &str, headers: Value, stream: &mut Stream<'_>) -> Result<()> {
     let outbound = request(&body, session, true)?;
     let socket = WebSocket::open(
         "wss://chatgpt.com/backend-api/codex/responses",
@@ -710,9 +705,7 @@ fn forward_ws(
     loop {
         let frame = socket.read()?;
         if frame["type"] != "text" {
-            return Err(
-                Error::http(502, "Halo Codex 在完成前关闭").with_code("codex_ws_closed")
-            );
+            return Err(Error::http(502, "Halo Codex 在完成前关闭").with_code("codex_ws_closed"));
         }
         let event: Value = serde_json::from_str(string(&frame["data"]))
             .map_err(|_| Error::http(502, "Halo Codex 返回无效事件"))?;
@@ -763,9 +756,7 @@ fn forward_http(
         let class = errors::classify(status, &value);
         return Err(Error::http(
             class["status"].as_u64().unwrap_or(status as u64) as u16,
-            class["message"]
-                .as_str()
-                .unwrap_or("Codex HTTP 请求失败"),
+            class["message"].as_str().unwrap_or("Codex HTTP 请求失败"),
         )
         .with_code("codex_http_error"));
     }
@@ -795,11 +786,19 @@ mod tests {
     #[test]
     fn request_reasoning_prefers_body_then_default() {
         let mut output = json!({});
-        apply_reasoning(&json!({"reasoning_effort": "high"}), Some("medium"), &mut output);
+        apply_reasoning(
+            &json!({"reasoning_effort": "high"}),
+            Some("medium"),
+            &mut output,
+        );
         assert_eq!(output["reasoning"]["effort"], "high");
 
         let mut output = json!({});
-        apply_reasoning(&json!({"reasoning": {"effort": "low"}}), Some("medium"), &mut output);
+        apply_reasoning(
+            &json!({"reasoning": {"effort": "low"}}),
+            Some("medium"),
+            &mut output,
+        );
         assert_eq!(output["reasoning"]["effort"], "low");
 
         let mut output = json!({});
@@ -864,7 +863,10 @@ mod tests {
     #[test]
     fn drops_plaintext_reasoning_keeps_encrypted_and_declares_search() {
         let err = reject_stateless_history(&json!({"previous_response_id":"resp_1"})).unwrap_err();
-        assert_eq!(err.code.as_deref(), Some("codex_stateless_history_required"));
+        assert_eq!(
+            err.code.as_deref(),
+            Some("codex_stateless_history_required")
+        );
 
         let (_, items) = input(&json!({
             "input": [

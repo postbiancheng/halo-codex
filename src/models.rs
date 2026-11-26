@@ -58,12 +58,7 @@ fn catalog(models: Value, remote: bool, refreshed_at: i64) -> Value {
     catalog_with_profiles(models, json!({}), remote, refreshed_at)
 }
 
-fn catalog_with_profiles(
-    models: Value,
-    profiles: Value,
-    remote: bool,
-    refreshed_at: i64,
-) -> Value {
+fn catalog_with_profiles(models: Value, profiles: Value, remote: bool, refreshed_at: i64) -> Value {
     json!({
         "models": models,
         "meta": {
@@ -163,9 +158,8 @@ pub fn refresh(params: &Value) -> Result<Value> {
         .ok_or_else(|| Error::http(401, "Codex 凭据缺少账号标识"))?;
     let client_version = config::client_version()?;
     let originator = config::originator(false)?;
-    let url = format!(
-        "https://chatgpt.com/backend-api/codex/models?client_version={client_version}"
-    );
+    let url =
+        format!("https://chatgpt.com/backend-api/codex/models?client_version={client_version}");
     let report = match http::open(
         "GET",
         &url,
@@ -216,7 +210,10 @@ pub fn refresh(params: &Value) -> Result<Value> {
     if current["secret"]["accessToken"] != credentials["accessToken"]
         || current["secret"]["identity"] != credentials["identity"]
     {
-        return Err(Error::http(409, "刷新 Codex 模型目录时账号凭据已更新，请重试"));
+        return Err(Error::http(
+            409,
+            "刷新 Codex 模型目录时账号凭据已更新，请重试",
+        ));
     }
 
     let models = with_image_models(models);
@@ -242,16 +239,21 @@ fn text<'a>(value: &'a Value, fields: &[&str]) -> Option<&'a str> {
 }
 
 fn context_limit(value: &Value) -> i64 {
-    ["context_window", "max_context_window", "maxInputTokens", "contextWindow"]
-        .into_iter()
-        .find_map(|key| {
-            value
-                .get(key)?
-                .as_i64()
-                .or_else(|| value.get(key)?.as_f64().map(|n| n as i64))
-                .filter(|n| *n > 0)
-        })
-        .unwrap_or(272_000)
+    [
+        "context_window",
+        "max_context_window",
+        "maxInputTokens",
+        "contextWindow",
+    ]
+    .into_iter()
+    .find_map(|key| {
+        value
+            .get(key)?
+            .as_i64()
+            .or_else(|| value.get(key)?.as_f64().map(|n| n as i64))
+            .filter(|n| *n > 0)
+    })
+    .unwrap_or(272_000)
 }
 
 fn items(report: &Value) -> Option<&Vec<Value>> {
@@ -277,15 +279,20 @@ fn parse(report: &Value) -> Result<(Vec<Value>, Value)> {
         };
         let name = text(item, &["display_name", "name", "slug", "id"]).unwrap_or(id);
         // Prefer the larger window when both are present (matches Codex catalog).
-        let limit = ["max_context_window", "context_window", "maxInputTokens", "contextWindow"]
-            .into_iter()
-            .find_map(|key| {
-                item.get(key)?
-                    .as_i64()
-                    .or_else(|| item.get(key)?.as_f64().map(|n| n as i64))
-                    .filter(|n| *n > 0)
-            })
-            .unwrap_or_else(|| context_limit(item));
+        let limit = [
+            "max_context_window",
+            "context_window",
+            "maxInputTokens",
+            "contextWindow",
+        ]
+        .into_iter()
+        .find_map(|key| {
+            item.get(key)?
+                .as_i64()
+                .or_else(|| item.get(key)?.as_f64().map(|n| n as i64))
+                .filter(|n| *n > 0)
+        })
+        .unwrap_or_else(|| context_limit(item));
         let mut row = model(id, name, limit);
         row["protocol"] = json!("responses");
         row["supportsToolCall"] = json!(true);
@@ -293,7 +300,9 @@ fn parse(report: &Value) -> Result<(Vec<Value>, Value)> {
             row["description"] = json!(description);
         }
         if let Some(modalities) = item.get("input_modalities").and_then(Value::as_array) {
-            let images = modalities.iter().any(|value| value.as_str() == Some("image"));
+            let images = modalities
+                .iter()
+                .any(|value| value.as_str() == Some("image"));
             row["supportsImages"] = json!(images);
             row["capabilities"]["supportsImages"] = json!(images);
         }
@@ -440,11 +449,7 @@ pub fn cooldown_models(params: &Value) -> Value {
             cooled.push(Value::String(id.to_string()));
         }
     }
-    if !model.is_empty()
-        && !cooled
-            .iter()
-            .any(|value| value.as_str() == Some(model))
-    {
+    if !model.is_empty() && !cooled.iter().any(|value| value.as_str() == Some(model)) {
         cooled.push(Value::String(model.to_string()));
     }
     json!({ "models": cooled })
@@ -489,16 +494,19 @@ pub fn reasoning_patch(params: &Value) -> Value {
         .or_else(|| body["model"].as_str())
         .unwrap_or("");
     match catalog_levels_for(model) {
-        Some(levels) if !levels.iter().any(|known| known.eq_ignore_ascii_case(&level)) => {
+        Some(levels)
+            if !levels
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(&level)) =>
+        {
             return json!({
                 "action": "skip",
                 "reason": "Codex 账号目录尚未声明这个思考等级"
             });
         }
-        None
-            if !["minimal", "low", "medium", "high", "xhigh", "max"]
-                .iter()
-                .any(|known| known.eq_ignore_ascii_case(&level)) =>
+        None if !["minimal", "low", "medium", "high", "xhigh", "max"]
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(&level)) =>
         {
             return json!({
                 "action": "skip",

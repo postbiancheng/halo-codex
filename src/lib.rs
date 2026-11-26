@@ -17,8 +17,11 @@ fn login_methods() -> Value {
     json!({"methods": [
       {"methodIndex": 0, "type": "oauth", "label": "Codex 设备授权", "browserMode":"external","prompts":[]},
       {
-        "methodIndex": 1, "type": "api", "label": "导入 Codex 访问凭据",
-        "prompts": [{"key": "accessToken", "label": "Codex access token", "type": "text", "secret": true}]
+        "methodIndex": 1, "type": "api", "label": "导入 Codex 凭据",
+        "prompts": [
+          {"key": "accessToken", "label": "access token 或完整 auth.json", "type": "text", "secret": true},
+          {"key": "refreshToken", "label": "refresh token（可选，可续期）", "type": "text", "secret": true, "optional": true}
+        ]
     }]})
 }
 
@@ -42,49 +45,107 @@ fn metadata() -> Value {
     sdk::error_rules::attach(meta, vec![], vec![])
 }
 
-fn normalize_access(access: &str) -> Result<Value> {
-    let claims = access
+fn jwt_claims(token: &str) -> Option<Value> {
+    token
         .split('.')
         .nth(1)
         .and_then(|v| URL_SAFE_NO_PAD.decode(v).ok())
         .and_then(|v| serde_json::from_slice::<Value>(&v).ok())
-        .ok_or_else(|| Error::http(400, "Codex 访问凭据格式无效"))?;
-    let account = claims
-        .pointer("/https:~1~1api.openai.com~1auth/chatgpt_account_id")
+}
+
+fn claim<'a>(claims: &'a Value, suffix: &str) -> Option<&'a str> {
+    let key = format!("https://api.openai.com/auth/{suffix}");
+    claims
+        .get(&key)
         .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| Error::http(400, "Codex 凭据缺少账号标识"))?;
-    let expires = claims["exp"].as_i64().unwrap_or(0).saturating_mul(1000);
-    if expires <= sdk::now() {
-        return Err(Error::http(401, "Codex 登录凭据已过期"));
-    }
-    let user = claims
-        .pointer("/https:~1~1api.openai.com~1auth/chatgpt_user_id")
-        .and_then(Value::as_str)
-        .or_else(|| claims["sub"].as_str())
-        .unwrap_or(account);
-    let display = [
+        .filter(|value| !value.is_empty())
+}
+
+fn display_name(claims: &Value) -> &str {
+    [
         claims.get("email").and_then(Value::as_str),
         claims.get("preferred_username").and_then(Value::as_str),
         claims
             .pointer("/https:~1~1api.openai.com~1profile/email")
             .and_then(Value::as_str),
-        claims
-            .pointer("/https:~1~1api.openai.com~1auth/user_email")
-            .and_then(Value::as_str),
+        claim(claims, "user_email"),
     ]
     .into_iter()
     .flatten()
     .map(str::trim)
     .find(|value| !value.is_empty())
-    .unwrap_or("Halo Codex");
-    Ok(json!({
+    .unwrap_or("Halo Codex")
+}
+
+fn normalize_access(access: &str) -> Result<Value> {
+    normalize_tokens(access, None, false)
+}
+
+fn normalize_tokens(access: &str, refresh: Option<&str>, allow_expired: bool) -> Result<Value> {
+    let access = access.trim();
+    if access.is_empty() || access.starts_with("sk-") {
+        return Err(Error::http(
+            400,
+            "请导入 Codex 的 ChatGPT 登录凭据；API Key 不能用于订阅通道",
+        ));
+    }
+    let claims = jwt_claims(access).ok_or_else(|| Error::http(400, "Codex 访问凭据格式无效"))?;
+    let account = claim(&claims, "chatgpt_account_id")
+        .ok_or_else(|| Error::http(400, "Codex 凭据缺少账号标识"))?;
+    let expires = claims["exp"].as_i64().unwrap_or(0).saturating_mul(1000);
+    let refresh = refresh.map(str::trim).filter(|value| !value.is_empty());
+    if expires <= sdk::now() && !(allow_expired && refresh.is_some()) {
+        return Err(Error::http(401, "Codex 登录凭据已过期"));
+    }
+    let user = claim(&claims, "chatgpt_user_id")
+        .or_else(|| claims["sub"].as_str())
+        .unwrap_or(account);
+    let mut secret = json!({
         "accessToken": access,
         "accountId": account,
         "expiresAt": expires,
         "identity": format!("{account}:{user}"),
-        "displayName": display
-    }))
+        "displayName": display_name(&claims)
+    });
+    if let Some(token) = refresh {
+        if token.len() < 20 {
+            return Err(Error::http(400, "Codex refresh token 格式无效"));
+        }
+        secret["refreshToken"] = json!(token);
+    }
+    Ok(secret)
+}
+
+fn credential_field<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn parse_auth_blob(raw: &str) -> Option<(String, Option<String>)> {
+    let trimmed = raw.trim();
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+    let parsed: Value = serde_json::from_str(trimmed).ok()?;
+    let root = parsed
+        .get("secret")
+        .or_else(|| parsed.get("pluginSecret"))
+        .filter(|value| value.is_object())
+        .unwrap_or(&parsed);
+    let tokens = root
+        .get("tokens")
+        .or_else(|| root.get("auth"))
+        .filter(|value| value.is_object())
+        .unwrap_or(root);
+    let mode = credential_field(root, &["auth_mode", "authMode"]).unwrap_or("chatgpt");
+    if mode != "chatgpt" {
+        return None;
+    }
+    let access = credential_field(tokens, &["accessToken", "access_token"])?.to_string();
+    let refresh = credential_field(tokens, &["refreshToken", "refresh_token"]).map(str::to_owned);
+    Some((access, refresh))
 }
 
 fn public(secret: &Value) -> Value {
@@ -99,13 +160,26 @@ fn public(secret: &Value) -> Value {
 fn normalize(params: &Value) -> Result<Value> {
     let source = &params["source"];
     let payload = &source["payload"];
-    let access = payload
-        .pointer("/inputs/accessToken")
+    let inputs = payload.get("inputs").unwrap_or(payload);
+    let raw = inputs
+        .get("accessToken")
         .or_else(|| payload.get("accessToken"))
         .or_else(|| payload.get("token"))
+        .or_else(|| payload.get("authJson"))
         .and_then(Value::as_str)
-        .ok_or_else(|| Error::http(400, "需要 Codex access token"))?;
-    let secret = normalize_access(access)?;
+        .ok_or_else(|| Error::http(400, "需要 Codex access token 或完整 auth.json"))?;
+    let prompt_refresh = inputs
+        .get("refreshToken")
+        .or_else(|| payload.get("refreshToken"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let (access, embedded_refresh) = match parse_auth_blob(raw) {
+        Some((access, refresh)) => (access, refresh),
+        None => (raw.trim().to_string(), None),
+    };
+    let refresh = prompt_refresh.or(embedded_refresh.as_deref());
+    let secret = normalize_tokens(&access, refresh, refresh.is_some())?;
     Ok(normalized(secret))
 }
 
@@ -167,5 +241,25 @@ fn handle(method: &str, mut params: Value) -> Result<Value> {
         "images.generate" => images::generate(&params, false),
         "images.edit" => images::generate(&params, true),
         _ => Err(Error::unsupported()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_auth_json_blob() {
+        let raw = r#"{
+            "auth_mode":"chatgpt",
+            "tokens":{
+                "access_token":"aaa.bbb.ccc",
+                "refresh_token":"refresh-token-value-1234567890"
+            }
+        }"#;
+        let (access, refresh) = parse_auth_blob(raw).unwrap();
+        assert_eq!(access, "aaa.bbb.ccc");
+        assert_eq!(refresh.as_deref(), Some("refresh-token-value-1234567890"));
+        assert!(parse_auth_blob("plain-token").is_none());
     }
 }

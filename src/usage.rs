@@ -5,9 +5,10 @@ use super::{auth, config, PROVIDER};
 use agent2api_wasm_sdk::{self as sdk, http, json, Error, Result, Value};
 
 fn headers(access: &str, account: &str) -> Value {
-    let originator = config::originator(false).unwrap_or_else(|_| config::DEFAULT_ORIGINATOR.into());
-    let user_agent =
-        config::user_agent(false).unwrap_or_else(|_| format!("codex_cli_rs/{}", config::DEFAULT_CLIENT_VERSION));
+    let originator =
+        config::originator(false).unwrap_or_else(|_| config::DEFAULT_ORIGINATOR.into());
+    let user_agent = config::user_agent(false)
+        .unwrap_or_else(|_| format!("codex_cli_rs/{}", config::DEFAULT_CLIENT_VERSION));
     json!({
         "Authorization": format!("Bearer {access}"),
         "ChatGPT-Account-Id": account,
@@ -93,7 +94,10 @@ fn merge_subscription(report: &mut Value, extra: Option<Value>) {
             subscription[key] = value.clone();
         }
     }
-    if subscription.as_object().is_some_and(|object| !object.is_empty()) {
+    if subscription
+        .as_object()
+        .is_some_and(|object| !object.is_empty())
+    {
         report["subscription"] = subscription;
     }
 }
@@ -190,8 +194,8 @@ fn reset(window: &Value) -> Option<i64> {
 
 fn window_name(seconds: Option<f64>, fallback: &str) -> (String, String) {
     match seconds {
-        Some(seconds) if seconds == 18_000.0 => ("5 小时".into(), "5h".into()),
-        Some(seconds) if seconds == 604_800.0 => ("每周".into(), "weekly".into()),
+        Some(18_000.0) => ("5 小时".into(), "5h".into()),
+        Some(604_800.0) => ("每周".into(), "weekly".into()),
         Some(seconds) if seconds >= 86_400.0 && seconds % 86_400.0 == 0.0 => {
             (format!("{} 天", seconds / 86_400.0), fallback.into())
         }

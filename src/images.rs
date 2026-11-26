@@ -34,9 +34,7 @@ pub fn catalog_rows() -> Vec<Value> {
 }
 
 pub fn is_model(model: &str) -> bool {
-    MODELS
-        .iter()
-        .any(|(id, _)| id.eq_ignore_ascii_case(model))
+    MODELS.iter().any(|(id, _)| id.eq_ignore_ascii_case(model))
 }
 
 fn supported(model: &str) -> bool {
@@ -192,7 +190,10 @@ pub fn generate(params: &Value, editing: bool) -> Result<Value> {
             format!("Codex 图片请使用 {} / {}", MODELS[0].0, MODELS[1].0),
         ));
     }
-    if body.get("n").is_some_and(|n| !n.as_u64().is_some_and(|n| (1..=4).contains(&n))) {
+    if body
+        .get("n")
+        .is_some_and(|n| !n.as_u64().is_some_and(|n| (1..=4).contains(&n)))
+    {
         return Err(Error::http(400, "Codex 图片数量 n 需为 1 至 4"));
     }
     if body.get("mask").is_some_and(|value| !value.is_null()) {
@@ -209,7 +210,14 @@ pub fn generate(params: &Value, editing: bool) -> Result<Value> {
     if let Some(size) = size(body) {
         outbound["size"] = json!(size);
     }
-    for key in ["n", "quality", "background", "style", "moderation", "output_format"] {
+    for key in [
+        "n",
+        "quality",
+        "background",
+        "style",
+        "moderation",
+        "output_format",
+    ] {
         if let Some(value) = body.get(key).filter(|value| !value.is_null()) {
             outbound[key] = value.clone();
         }
@@ -229,14 +237,11 @@ pub fn generate(params: &Value, editing: bool) -> Result<Value> {
         .map_err(|error| uncertain(&error.message))?;
     let payload: Value =
         serde_json::from_slice(&bytes).map_err(|_| uncertain("上游没有返回有效 JSON"))?;
-    if !(200..300).contains(&status) || payload.get("error").is_some_and(|error| !error.is_null())
-    {
+    if !(200..300).contains(&status) || payload.get("error").is_some_and(|error| !error.is_null()) {
         let class = errors::classify(status, &payload);
         return Err(Error::http(
             class["status"].as_u64().unwrap_or(status as u64) as u16,
-            class["message"]
-                .as_str()
-                .unwrap_or("Codex 图片请求失败"),
+            class["message"].as_str().unwrap_or("Codex 图片请求失败"),
         )
         .with_code("codex_image_error"));
     }
