@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --target wasm32-unknown-unknown -- -D warnings
+      - name: Test
+        run: cargo test
+      - name: Pack
+        run: ./scripts/pack.sh
+      - name: Assert pack artifact
+        run: |
+          test -f dist/agent2api-wasm-halo-codex-*.zip
+          unzip -l dist/agent2api-wasm-halo-codex-*.zip | grep -E 'halo-codex.wasm|assets/logo.svg|pack.json|wasm.json'
+          ./scripts/checksum.sh
