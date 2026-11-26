@@ -25,12 +25,12 @@ Provider id：`halo-codex`。许可证：AGPL-3.0-only。
 ./scripts/checksum.sh
 export AGENT2API_API_KEY=...   # 或 ~/.agent2api/config.json 的 apiKey
 ./scripts/install-local.sh
-./scripts/smoke-local.sh       # 真实账号：模型刷新 + 用量 + 流式对话
+./scripts/smoke-local.sh       # 真实账号：模型刷新 + 用量 + 短对话 + gpt-6-luna ≥40s 长测
 ```
 
 产物：`dist/agent2api-wasm-halo-codex-<version>.zip`
 
-**提交 / 推送 / 打 tag / Release 前必须先通过 `smoke-local.sh`。** 仅单元测试或插件 `ready` 不算过关。
+**提交 / 推送 / 打 tag / Release 前必须先通过 `smoke-local.sh`。** 仅单元测试或插件 `ready` 不算过关。长测时长可用 `HALO_CODEX_LUNA_LONG_SECONDS` 覆盖（默认 40）。
 
 ## 工程化
 

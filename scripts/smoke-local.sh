@@ -52,8 +52,9 @@ def call(method, path, body=None, timeout=120, stream=False):
                     line = resp.readline()
                     if not line:
                         break
-                    chunks.append(line.decode("utf-8", "replace"))
-                    if len(chunks) >= 80:
+                    text = line.decode("utf-8", "replace")
+                    chunks.append(text)
+                    if text.strip() == "data: [DONE]":
                         break
                 return resp.status, "".join(chunks)
             raw = resp.read().decode()
@@ -193,5 +194,94 @@ if '"content"' not in stream and "content" not in stream:
     if "error" in stream.lower() and "ready" not in stream.lower():
         fail(f"chat stream looks like error: {stream[:500]}")
 ok(f"chat stream on {model} ({len(stream)} chars)")
+
+
+def extract_assistant_text(raw: str) -> str:
+    parts = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        try:
+            event = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        for choice in event.get("choices") or []:
+            delta = choice.get("delta") or {}
+            content = delta.get("content")
+            if isinstance(content, str) and content:
+                parts.append(content)
+            message = choice.get("message") or {}
+            content = message.get("content")
+            if isinstance(content, str) and content:
+                parts.append(content)
+    return "".join(parts)
+
+
+luna = next((item for item in chat_models if item == "gpt-6-luna"), None)
+luna = luna or next((item for item in chat_models if "luna" in item.lower()), None)
+if not luna:
+    fail("gpt-6-luna (or any luna chat model) missing from catalog")
+
+long_seconds = float(os.environ.get("HALO_CODEX_LUNA_LONG_SECONDS", "40"))
+long_timeout = max(180, int(long_seconds) + 120)
+started = time.time()
+messages = [
+    {
+        "role": "user",
+        "content": (
+            "请用中文详细讲解：什么是冒烟测试、它和回归测试的区别、"
+            "以及在 Agent2API WASM 插件发版流程里为什么要做。请分点展开，"
+            "每点至少写一段，尽量写充分，不要提前结束。"
+        ),
+    }
+]
+rounds = 0
+chars = 0
+while True:
+    rounds += 1
+    status, stream = call(
+        "POST",
+        "/v1/chat/completions",
+        {
+            "model": luna,
+            "stream": True,
+            "messages": messages,
+            "max_tokens": 1200,
+        },
+        timeout=long_timeout,
+        stream=True,
+    )
+    if status != 200:
+        fail(f"luna long chat HTTP {status}: {stream}")
+    if "data: " not in stream:
+        fail(f"luna long chat empty stream: {stream[:400]}")
+    if "error" in stream.lower() and '"content"' not in stream:
+        fail(f"luna long chat error stream: {stream[:500]}")
+    text = extract_assistant_text(stream)
+    chars += len(text)
+    elapsed = time.time() - started
+    if elapsed >= long_seconds:
+        break
+    if rounds >= 8:
+        fail(
+            f"luna long chat only reached {elapsed:.1f}s after {rounds} rounds "
+            f"(need >={long_seconds:.0f}s)"
+        )
+    messages.append({"role": "assistant", "content": text or "（上轮无文本，请继续）"})
+    messages.append(
+        {
+            "role": "user",
+            "content": "请继续展开下一点，再写一段更细的说明，不要重复前面内容。",
+        }
+    )
+
+elapsed = time.time() - started
+if elapsed < long_seconds:
+    fail(f"luna long chat too short: {elapsed:.1f}s < {long_seconds:.0f}s")
+ok(f"luna long chat on {luna}: {elapsed:.1f}s rounds={rounds} chars={chars}")
 print("SMOKE PASS")
 PY
