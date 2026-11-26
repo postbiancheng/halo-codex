@@ -186,6 +186,17 @@ fn due(secret: &Value, lead: i64) -> bool {
     secret["expiresAt"].as_i64().unwrap_or(0) <= sdk::now().saturating_add(lead)
 }
 
+fn can_use_current(force: bool, secret: &Value, status: Option<u16>, now: i64) -> bool {
+    !force
+        && matches!(status, None | Some(408 | 425 | 429 | 500..=599))
+        && secret["accessToken"]
+            .as_str()
+            .is_some_and(|token| !token.is_empty())
+        && secret["expiresAt"]
+            .as_i64()
+            .is_some_and(|expires| expires > now)
+}
+
 pub fn expiring(params: &Value) -> Result<bool> {
     let account = sdk::account()?;
     let secret = &account["secret"];
@@ -210,17 +221,28 @@ pub fn credentials(force: bool) -> Result<Value> {
     let token = current["refreshToken"]
         .as_str()
         .ok_or_else(|| Error::http(401, "请重新授权 Codex"))?;
-    let (status, tokens) = post_json(
+    let refresh = post_json(
         TOKEN,
         json!({"grant_type":"refresh_token","client_id":CLIENT,"refresh_token":token}),
-    )?;
-    if !(200..300).contains(&status) {
-        return Err(auth_http_error(
-            status,
-            "Codex 登录续期失败，请重新授权",
-            &tokens,
-        ));
-    }
+    )
+    .and_then(|(status, tokens)| {
+        if (200..300).contains(&status) {
+            Ok(tokens)
+        } else {
+            Err(auth_http_error(
+                status,
+                "Codex 登录续期失败，请重新授权",
+                &tokens,
+            ))
+        }
+    });
+    let tokens = match refresh {
+        Ok(tokens) => tokens,
+        Err(error) if can_use_current(force, current, error.status, sdk::now()) => {
+            return Ok(current.clone());
+        }
+        Err(error) => return Err(error),
+    };
     let new = from_tokens(&tokens, Some(current))?;
     if new["identity"] != current["identity"] {
         return Err(Error::http(409, "Codex 账号身份已变化"));
@@ -233,4 +255,19 @@ pub fn credentials(force: bool) -> Result<Value> {
         return Err(Error::http(409, "保存 Codex 续期凭据失败"));
     }
     Ok(new)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_automatic_transient_failures_can_use_an_unexpired_token() {
+        let secret = json!({"accessToken":"current-token","expiresAt":1000});
+        assert!(can_use_current(false, &secret, None, 999));
+        assert!(can_use_current(false, &secret, Some(503), 999));
+        assert!(!can_use_current(true, &secret, Some(503), 999));
+        assert!(!can_use_current(false, &secret, Some(503), 1000));
+        assert!(!can_use_current(false, &secret, Some(401), 999));
+    }
 }

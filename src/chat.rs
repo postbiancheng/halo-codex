@@ -78,12 +78,7 @@ fn convert_tools(tools: &[Value]) -> Result<Vec<Value>> {
 }
 
 fn convert_tool_choice(choice: &Value) -> Value {
-    if choice.is_object() {
-        let name = choice
-            .pointer("/function/name")
-            .or_else(|| choice.get("name"))
-            .cloned()
-            .unwrap_or(Value::Null);
+    if let Some(name) = choice.pointer("/function/name") {
         json!({"type":"function","name":name})
     } else {
         choice.clone()
@@ -172,8 +167,20 @@ fn normalize_native_item(mut item: Value) -> Result<Option<Value>> {
             }
         }
     }
-    if kind == "message" && fields.get("role").and_then(Value::as_str) == Some("system") {
-        fields.insert("role".into(), json!("developer"));
+    if kind == "message" {
+        let role = fields.get("role").and_then(Value::as_str);
+        if let Some(content) = fields.get("content").and_then(Value::as_str) {
+            let content_type = if role == Some("assistant") {
+                "output_text"
+            } else {
+                "input_text"
+            };
+            let parts = json!([{"type":content_type,"text":content}]);
+            fields.insert("content".into(), parts);
+        }
+        if fields.get("role").and_then(Value::as_str) == Some("system") {
+            fields.insert("role".into(), json!("developer"));
+        }
     }
     Ok(Some(item))
 }
@@ -356,12 +363,24 @@ fn input_messages(messages: &[Value], include_instructions: bool) -> Result<(Str
 }
 
 fn input(body: &Value) -> Result<(String, Vec<Value>)> {
+    let instructions = || string(&body["instructions"]).to_owned();
+    if let Some(text) = body["input"].as_str() {
+        return Ok((
+            instructions(),
+            vec![
+                json!({"type":"message","role":"user","content":[{"type":"input_text","text":text}]}),
+            ],
+        ));
+    }
     if let Some(items) = body["input"].as_array() {
-        let instructions = body["instructions"].as_str().unwrap_or("").to_string();
         let mut normalized = Vec::with_capacity(items.len());
         for item in items {
             if let Some(pass) = passthrough_input_item(item)? {
                 normalized.push(pass);
+            } else if matches!(item["role"].as_str(), Some("system" | "developer")) {
+                let mut message = item.clone();
+                message["type"] = json!("message");
+                normalized.extend(normalize_native_item(message)?);
             } else if item.get("role").is_some() {
                 let (_ignored, mut rows) = input_messages(std::slice::from_ref(item), false)?;
                 normalized.append(&mut rows);
@@ -372,7 +391,7 @@ fn input(body: &Value) -> Result<(String, Vec<Value>)> {
                 return Err(Error::http(400, "Halo Codex input 条目缺少有效 type"));
             }
         }
-        return Ok((instructions, normalized));
+        return Ok((instructions(), normalized));
     }
     let messages = body["messages"]
         .as_array()
@@ -380,21 +399,20 @@ fn input(body: &Value) -> Result<(String, Vec<Value>)> {
     input_messages(messages, true)
 }
 
-fn apply_catalog_defaults(body: &Value, instructions: &mut String, output: &mut Value) {
+fn apply_catalog_defaults(body: &Value, output: &mut Value) {
     let model = string(&body["model"]);
     let Some(profile) = models::profile_for(model) else {
         return;
     };
-    if instructions.trim().is_empty() {
+    if string(&output["instructions"]).trim().is_empty() {
         if let Some(base) = profile["baseInstructions"]
             .as_str()
             .filter(|value| !value.is_empty())
         {
-            *instructions = base.to_string();
             output["instructions"] = json!(base);
         }
     }
-    if output.get("text").is_none()
+    if !body["text"].is_object()
         && body.get("response_format").is_none()
         && profile["supportVerbosity"] == true
     {
@@ -411,7 +429,7 @@ fn request(body: &Value, session: &str, websocket: bool) -> Result<Value> {
     // Codex backend currently rejects store=true ("Store must be set to false"),
     // so previous_response_id chaining is unavailable on this endpoint.
     reject_stateless_history(body)?;
-    let (mut instructions, items) = input(body)?;
+    let (instructions, items) = input(body)?;
     let mut output = if websocket {
         json!({"type":"response.create","model":body["model"],"instructions":instructions,
             "input":items,"stream":true,"store":false,"parallel_tool_calls":true})
@@ -419,7 +437,7 @@ fn request(body: &Value, session: &str, websocket: bool) -> Result<Value> {
         json!({"model":body["model"],"instructions":instructions,
             "input":items,"stream":true,"store":false,"parallel_tool_calls":true})
     };
-    apply_catalog_defaults(body, &mut instructions, &mut output);
+    apply_catalog_defaults(body, &mut output);
     if let Some(tools) = body["tools"].as_array() {
         output["tools"] = json!(convert_tools(tools)?);
         if body
@@ -448,7 +466,9 @@ fn request(body: &Value, session: &str, websocket: bool) -> Result<Value> {
     apply_reasoning(body, config::reasoning_effort()?.as_deref(), &mut output);
     ensure_encrypted_include(&mut output);
     declare_search(&mut output);
-    if let Some(format) = body.get("response_format") {
+    if let Some(text) = body["text"].as_object() {
+        output["text"] = json!(text);
+    } else if let Some(format) = body.get("response_format") {
         output["text"] = if format["type"] == "json_schema" {
             let mut schema = format["json_schema"]
                 .as_object()
@@ -475,10 +495,20 @@ struct Stream<'a> {
     model: &'a str,
     id: String,
     tools: BTreeMap<u64, Tool>,
+    started: bool,
 }
 
 impl Stream<'_> {
-    fn emit(&self, delta: Value, finish: Value, usage: Option<Value>) -> Result<()> {
+    fn emit(&mut self, delta: Value, finish: Value, usage: Option<Value>) -> Result<()> {
+        if !self.started {
+            sdk::stream_head(200)?;
+            self.emit_chunk(json!({"role":"assistant"}), Value::Null, None)?;
+            self.started = true;
+        }
+        self.emit_chunk(delta, finish, usage)
+    }
+
+    fn emit_chunk(&self, delta: Value, finish: Value, usage: Option<Value>) -> Result<()> {
         let mut frame = json!({"id":self.id,"object":"chat.completion.chunk","model":self.model,
             "created":sdk::now() / 1000,"choices":[{"index":0,"delta":delta,"finish_reason":finish}]});
         if let Some(value) = usage {
@@ -545,7 +575,12 @@ impl Stream<'_> {
         if matches!(kind, "error" | "response.failed") {
             let err = event
                 .get("error")
-                .or_else(|| event.pointer("/response/error"))
+                .filter(|value| !value.is_null())
+                .or_else(|| {
+                    event
+                        .pointer("/response/error")
+                        .filter(|value| !value.is_null())
+                })
                 .unwrap_or(event);
             let status = event["status"]
                 .as_u64()
@@ -556,7 +591,8 @@ impl Stream<'_> {
                 class["status"].as_u64().unwrap_or(status as u64) as u16,
                 class["message"].as_str().unwrap_or("Halo Codex 请求失败"),
             )
-            .with_code(err["code"].as_str().unwrap_or("codex_ws_error")));
+            .with_code(err["code"].as_str().unwrap_or("codex_ws_error"))
+            .with_reset(class["reset_at"].as_i64()));
         }
         match kind {
             "response.output_text.delta" | "response.refusal.delta" => {
@@ -680,6 +716,7 @@ pub fn forward(body: Value, params: &Value, secret: &Value) -> Result<()> {
         model: &model,
         id: format!("chatcmpl-{request_id}"),
         tools: BTreeMap::new(),
+        started: false,
     };
     match config::transport()?.as_str() {
         config::TRANSPORT_HTTP => {
@@ -701,7 +738,6 @@ fn forward_ws(body: Value, session: &str, headers: Value, stream: &mut Stream<'_
         &[],
     )?;
     socket.send_text(&outbound.to_string())?;
-    let mut started = false;
     loop {
         let frame = socket.read()?;
         if frame["type"] != "text" {
@@ -709,11 +745,6 @@ fn forward_ws(body: Value, session: &str, headers: Value, stream: &mut Stream<'_
         }
         let event: Value = serde_json::from_str(string(&frame["data"]))
             .map_err(|_| Error::http(502, "Halo Codex 返回无效事件"))?;
-        if !started {
-            sdk::stream_head(200)?;
-            stream.emit(json!({"role":"assistant"}), Value::Null, None)?;
-            started = true;
-        }
         if stream.handle(&event)? {
             return Ok(());
         }
@@ -758,16 +789,17 @@ fn forward_http(
             class["status"].as_u64().unwrap_or(status as u64) as u16,
             class["message"].as_str().unwrap_or("Codex HTTP 请求失败"),
         )
-        .with_code("codex_http_error"));
+        .with_code("codex_http_error")
+        .with_reset(class["reset_at"].as_i64()));
     }
 
-    sdk::stream_head(200)?;
-    stream.emit(json!({"role":"assistant"}), Value::Null, None)?;
     let mut decoder = SseDecoder::default();
     while let Some(bytes) = response.read()? {
         for data in decoder.push(&bytes)? {
             if data == "[DONE]" {
-                return sdk::stream_bytes(b"data: [DONE]\n\n");
+                return Err(
+                    Error::http(502, "Codex HTTP 流提前中断").with_code("codex_http_closed")
+                );
             }
             let event: Value = serde_json::from_str(&data)
                 .map_err(|_| Error::http(502, "Codex HTTP 返回无效事件"))?;
@@ -782,6 +814,44 @@ fn forward_http(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upstream_failure_after_creation_does_not_start_the_stream() {
+        let mut stream = Stream {
+            model: "test-model",
+            id: "test-id".into(),
+            tools: BTreeMap::new(),
+            started: false,
+        };
+        assert!(!stream.handle(&json!({"type":"response.created"})).unwrap());
+        let error = stream
+            .handle(&json!({
+                "type":"response.failed",
+                "response":{"error":{"code":"rate_limit_exceeded","message":"Rate limit","retry_after":30}}
+            }))
+            .unwrap_err();
+        assert_eq!(error.status, Some(429));
+        assert_eq!(error.reset_at, Some(sdk::now() + 30_000));
+        assert!(!stream.started);
+    }
+
+    #[test]
+    fn normalizes_native_shorthand_without_losing_instruction_roles() {
+        let (instructions, items) =
+            input(&json!({"instructions":"brief","input":"hello"})).unwrap();
+        assert_eq!(instructions, "brief");
+        assert_eq!(items[0]["content"][0]["text"], "hello");
+        let (_, items) = input(&json!({"input":[{"role":"system","content":"be brief"}]})).unwrap();
+        assert_eq!(items[0]["role"], "developer");
+        assert_eq!(items[0]["content"][0]["text"], "be brief");
+
+        let custom = json!({"type":"custom","name":"lookup"});
+        assert_eq!(convert_tool_choice(&custom), custom);
+        assert_eq!(
+            convert_tool_choice(&json!({"type":"function","function":{"name":"lookup"}})),
+            json!({"type":"function","name":"lookup"})
+        );
+    }
 
     #[test]
     fn request_reasoning_prefers_body_then_default() {

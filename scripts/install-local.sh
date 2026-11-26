@@ -62,7 +62,10 @@ for _ in range(40):
     with urllib.request.urlopen(req, timeout=30) as response:
         data = json.load(response)
     packs = ((data.get("data") or data).get("packs") or [])
-    current = next(item for item in packs if item["id"] == pack["id"])
+    current = next((item for item in packs if item["id"] == pack["id"]), None)
+    if current is None:
+        time.sleep(0.4)
+        continue
     phase = current.get("startup", {}).get("phase")
     print(f"v={current.get('version')} phase={phase}")
     if current.get("version") == pack["version"] and phase == "ready":

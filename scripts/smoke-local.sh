@@ -91,6 +91,57 @@ def ok(msg):
     print(f"OK: {msg}")
 
 
+def check_models_refresh(status, response):
+    if status != 200 or not isinstance(response, dict):
+        fail(f"models.refresh HTTP {status}: {response}")
+    result = response.get("data", response)
+    if not isinstance(result, dict) or result.get("failed") or response.get("success") is False:
+        fail("models.refresh reported a failure")
+    rows = result.get("results") or []
+    if rows:
+        if any(row.get("status") in {"refreshed", "unchanged"} for row in rows):
+            return
+    elif result.get("refreshed") or (
+        result.get("refreshed") is False and result.get("count", 0) > 0 and not result.get("message")
+    ):
+        return
+    fail("models.refresh did not report a refreshed or unchanged catalog")
+
+
+def assistant_text(status, raw, label):
+    if status != 200 or not isinstance(raw, str):
+        fail(f"{label} HTTP {status}: {raw}")
+    parts = []
+    finished = done = False
+    for line in raw.splitlines():
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if payload == "[DONE]":
+            done = True
+            break
+        if not payload:
+            continue
+        try:
+            event = json.loads(payload)
+        except json.JSONDecodeError:
+            fail(f"{label} returned invalid SSE JSON")
+        if not isinstance(event, dict) or event.get("error") is not None or event.get("type") == "error":
+            fail(f"{label} returned an error event")
+        for choice in event.get("choices") or []:
+            finish = choice.get("finish_reason")
+            if finish in {"content_filter", "error"}:
+                fail(f"{label} finished with {finish}")
+            finished |= bool(finish)
+            content = (choice.get("delta") or {}).get("content")
+            if isinstance(content, str):
+                parts.append(content)
+    text = "".join(parts)
+    if not text.strip() or not finished or not done:
+        fail(f"{label} missing text, finish_reason, or [DONE]")
+    return text
+
+
 status, plugins = call("GET", "/api/plugins")
 if status != 200:
     fail(f"plugins HTTP {status}: {plugins}")
@@ -118,9 +169,8 @@ if not chat_models:
 ok(f"/v1/models has {len(owned)} halo-codex models; chat={chat_models[0]}")
 
 status, refresh = call("POST", "/api/models/refresh", {"provider": PROVIDER, "force": True})
-if status != 200:
-    fail(f"models.refresh HTTP {status}: {refresh}")
-ok(f"models.refresh => {json.dumps(refresh, ensure_ascii=False)[:180]}")
+check_models_refresh(status, refresh)
+ok("models.refresh returned a usable catalog")
 
 status, accounts = call("GET", "/api/accounts?includeHidden=true")
 if status != 200:
@@ -227,40 +277,8 @@ status, stream = call(
     timeout=180,
     stream=True,
 )
-if status != 200:
-    fail(f"chat HTTP {status}: {stream}")
-if "data: " not in stream:
-    fail(f"chat stream empty: {stream[:400]}")
-if '"content"' not in stream and "content" not in stream:
-    # still accept finish-only if model replied via delta elsewhere
-    if "error" in stream.lower() and "ready" not in stream.lower():
-        fail(f"chat stream looks like error: {stream[:500]}")
-ok(f"chat stream on {model} ({len(stream)} chars)")
-
-
-def extract_assistant_text(raw: str) -> str:
-    parts = []
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line.startswith("data:"):
-            continue
-        payload = line[5:].strip()
-        if not payload or payload == "[DONE]":
-            continue
-        try:
-            event = json.loads(payload)
-        except json.JSONDecodeError:
-            continue
-        for choice in event.get("choices") or []:
-            delta = choice.get("delta") or {}
-            content = delta.get("content")
-            if isinstance(content, str) and content:
-                parts.append(content)
-            message = choice.get("message") or {}
-            content = message.get("content")
-            if isinstance(content, str) and content:
-                parts.append(content)
-    return "".join(parts)
+text = assistant_text(status, stream, "chat")
+ok(f"chat stream on {model} ({len(text)} text chars)")
 
 
 luna = next((item for item in chat_models if item == "gpt-6-luna"), None)
@@ -270,7 +288,7 @@ if not luna:
 
 long_seconds = float(os.environ.get("HALO_CODEX_LUNA_LONG_SECONDS", "40"))
 long_timeout = max(180, int(long_seconds) + 120)
-started = time.time()
+started = time.monotonic()
 messages = [
     {
         "role": "user",
@@ -297,15 +315,9 @@ while True:
         timeout=long_timeout,
         stream=True,
     )
-    if status != 200:
-        fail(f"luna long chat HTTP {status}: {stream}")
-    if "data: " not in stream:
-        fail(f"luna long chat empty stream: {stream[:400]}")
-    if "error" in stream.lower() and '"content"' not in stream:
-        fail(f"luna long chat error stream: {stream[:500]}")
-    text = extract_assistant_text(stream)
+    text = assistant_text(status, stream, "luna long chat")
     chars += len(text)
-    elapsed = time.time() - started
+    elapsed = time.monotonic() - started
     if elapsed >= long_seconds:
         break
     if rounds >= 8:
@@ -313,7 +325,7 @@ while True:
             f"luna long chat only reached {elapsed:.1f}s after {rounds} rounds "
             f"(need >={long_seconds:.0f}s)"
         )
-    messages.append({"role": "assistant", "content": text or "（上轮无文本，请继续）"})
+    messages.append({"role": "assistant", "content": text})
     messages.append(
         {
             "role": "user",
@@ -321,7 +333,7 @@ while True:
         }
     )
 
-elapsed = time.time() - started
+elapsed = time.monotonic() - started
 if elapsed < long_seconds:
     fail(f"luna long chat too short: {elapsed:.1f}s < {long_seconds:.0f}s")
 ok(f"luna long chat on {luna}: {elapsed:.1f}s rounds={rounds} chars={chars}")

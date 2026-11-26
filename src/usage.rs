@@ -18,6 +18,22 @@ fn headers(access: &str, account: &str) -> Value {
     })
 }
 
+fn absolute_time(value: &Value) -> Option<i64> {
+    if let Some(date) = value.as_str().and_then(|value| {
+        time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339).ok()
+    }) {
+        return i64::try_from(date.unix_timestamp_nanos().div_euclid(1_000_000)).ok();
+    }
+    let at = value
+        .as_i64()
+        .or_else(|| value.as_str()?.trim().parse().ok())?;
+    match at {
+        ..=0 => None,
+        1..100_000_000_000 => at.checked_mul(1000),
+        _ => Some(at),
+    }
+}
+
 /// ChatGPT Plus/Pro subscription end time from `/subscriptions` (not present on `/wham/usage`).
 fn subscription_info(access: &str, account: &str) -> Option<Value> {
     let url = format!("https://chatgpt.com/backend-api/subscriptions?account_id={account}");
@@ -36,23 +52,7 @@ fn subscription_info(access: &str, account: &str) -> Option<Value> {
     );
     let expire_at = ["active_until", "expires_at", "renews_at", "next_renewal_at"]
         .into_iter()
-        .find_map(|key| {
-            let value = report.get(key)?;
-            if let Some(text) = value.as_str() {
-                return chrono::DateTime::parse_from_rfc3339(text)
-                    .ok()
-                    .map(|date| date.timestamp_millis());
-            }
-            let at = value.as_i64().or_else(|| value.as_str()?.parse().ok())?;
-            if at <= 0 {
-                return None;
-            }
-            if at < 100_000_000_000 {
-                at.checked_mul(1000)
-            } else {
-                Some(at)
-            }
-        });
+        .find_map(|key| absolute_time(report.get(key)?));
     let will_renew = report
         .get("will_renew")
         .or_else(|| report.get("willRenew"))
@@ -158,23 +158,7 @@ fn number(value: Option<&Value>) -> Option<f64> {
 fn reset(window: &Value) -> Option<i64> {
     ["reset_at", "resets_at", "resetAt"]
         .into_iter()
-        .find_map(|key| {
-            let value = window.get(key)?;
-            if let Some(text) = value.as_str() {
-                if let Ok(date) = chrono::DateTime::parse_from_rfc3339(text) {
-                    return Some(date.timestamp_millis());
-                }
-            }
-            let at = value.as_i64().or_else(|| value.as_str()?.parse().ok())?;
-            if at <= 0 {
-                return None;
-            }
-            if at < 100_000_000_000 {
-                at.checked_mul(1000)
-            } else {
-                Some(at)
-            }
-        })
+        .find_map(|key| absolute_time(window.get(key)?))
         .or_else(|| {
             [
                 "reset_after_seconds",
@@ -438,6 +422,20 @@ fn parse(raw: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_subscription_and_quota_timestamps_in_milliseconds() {
+        assert_eq!(
+            absolute_time(&json!("2026-11-26T08:00:00.125+08:00")),
+            Some(1_795_651_200_125)
+        );
+        assert_eq!(absolute_time(&json!("1795651200")), Some(1_795_651_200_000));
+        assert_eq!(
+            absolute_time(&json!(1795651200000_i64)),
+            Some(1_795_651_200_000)
+        );
+        assert_eq!(absolute_time(&json!("unknown")), None);
+    }
 
     #[test]
     fn formats_allowance_windows_and_reset_times() {

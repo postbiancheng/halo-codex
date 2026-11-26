@@ -177,6 +177,30 @@ fn pack_result(payload: &Value) -> Result<Value> {
     Ok(result)
 }
 
+fn response_payload(status: u16, bytes: Result<Vec<u8>>) -> Result<Value> {
+    let parsed = bytes.and_then(|bytes| {
+        serde_json::from_slice::<Value>(&bytes).map_err(|_| Error::new("上游没有返回有效 JSON"))
+    });
+    if (200..300).contains(&status) {
+        let payload = parsed.map_err(|error| uncertain(&error.message))?;
+        if payload.get("error").is_none_or(Value::is_null) {
+            return Ok(payload);
+        }
+        return Err(image_error(status, &payload));
+    }
+    Err(image_error(status, &parsed.unwrap_or(Value::Null)))
+}
+
+fn image_error(status: u16, payload: &Value) -> Error {
+    let class = errors::classify(status, payload);
+    Error::http(
+        class["status"].as_u64().unwrap_or(status as u64) as u16,
+        class["message"].as_str().unwrap_or("Codex 图片请求失败"),
+    )
+    .with_code("codex_image_error")
+    .with_reset(class["reset_at"].as_i64())
+}
+
 pub fn generate(params: &Value, editing: bool) -> Result<Value> {
     let body = &params["body"];
     let model = body["model"]
@@ -231,26 +255,23 @@ pub fn generate(params: &Value, editing: bool) -> Result<Value> {
 
     let response = http::open("POST", path, headers(&secret)?, Some(&outbound))
         .map_err(|_| uncertain("请求传输失败"))?;
-    let status = response.status;
-    let bytes = response
-        .bytes(MAX_RESPONSE)
-        .map_err(|error| uncertain(&error.message))?;
-    let payload: Value =
-        serde_json::from_slice(&bytes).map_err(|_| uncertain("上游没有返回有效 JSON"))?;
-    if !(200..300).contains(&status) || payload.get("error").is_some_and(|error| !error.is_null()) {
-        let class = errors::classify(status, &payload);
-        return Err(Error::http(
-            class["status"].as_u64().unwrap_or(status as u64) as u16,
-            class["message"].as_str().unwrap_or("Codex 图片请求失败"),
-        )
-        .with_code("codex_image_error"));
-    }
+    let payload = response_payload(response.status, response.bytes(MAX_RESPONSE))?;
     pack_result(&payload)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preserves_error_status_when_the_image_response_cannot_be_parsed() {
+        let unauthorized = response_payload(401, Ok(b"<html>".to_vec())).unwrap_err();
+        assert_eq!(unauthorized.status, Some(401));
+        let rate_limit = response_payload(429, Err(Error::new("EOF"))).unwrap_err();
+        assert_eq!(rate_limit.status, Some(429));
+        let uncertain = response_payload(200, Ok(Vec::new())).unwrap_err();
+        assert_eq!(uncertain.code.as_deref(), Some("image_output_uncertain"));
+    }
 
     #[test]
     fn catalogs_image_models() {

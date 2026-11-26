@@ -39,13 +39,14 @@ export AGENT2API_API_KEY=...   # 或 ~/.agent2api/config.json 的 apiKey
 - 发版：冒烟通过后，对齐 `Cargo.toml` 与 `pack.json` 版本再：
 
 ```bash
-git tag v0.2.8 && git push origin v0.2.8
+git tag v0.2.9 && git push origin v0.2.9
 ```
 
 `release.yml` 会上传 zip 与 `.sha256`。
 
 ## 版本摘要
 
+- **0.2.9**：收紧冒烟检查；修复流式错误、提前续期、原生 Responses 参数和图片错误状态；替换停止维护的时间依赖
 - **0.2.8**：修复嵌套 JWT `auth`/`profile` 解析；账号展示邮箱；冒烟用 Codex UA 便于客户端识别
 - **0.2.7**：导入完整 `auth.json`/refresh；LICENSE + CI/Release/checksum/本地安装脚本
 - **0.2.6**：图片/对话冷却隔离；JWT 邮箱账号名；统一 `User-Agent`；有 tools 时默认 `tool_choice=auto`
