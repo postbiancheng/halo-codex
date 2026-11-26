@@ -38,12 +38,26 @@ if not key:
     )
     raise SystemExit(2)
 
-H = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+# Match Agent2API builtin Codex client catalog (product token in UA).
+CLIENT_UA = os.environ.get(
+    "HALO_CODEX_SMOKE_UA",
+    "codex_cli_rs/0.160.1 (Halo-Codex-smoke; darwin)",
+)
+H = {
+    "Authorization": f"Bearer {key}",
+    "Content-Type": "application/json",
+    "User-Agent": CLIENT_UA,
+}
 
 
-def call(method, path, body=None, timeout=120, stream=False):
+def call(method, path, body=None, timeout=120, stream=False, headers=None):
     data = None if body is None else json.dumps(body).encode()
-    req = urllib.request.Request(f"{HOST}{path}", data=data, headers=H, method=method)
+    req_headers = dict(H)
+    if headers:
+        req_headers.update(headers)
+    req = urllib.request.Request(
+        f"{HOST}{path}", data=data, headers=req_headers, method=method
+    )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             if stream:
@@ -123,6 +137,34 @@ if not account:
     fail("no enabled halo-codex account")
 account_id = account["id"]
 ok(f"account {account_id} enabled canRefresh={account.get('canRefresh')}")
+
+# Rewrite public name/email from nested JWT claims (fixes stale "Halo Codex" labels).
+status, refreshed = call("POST", "/api/accounts/refresh", {"id": account_id}, timeout=90)
+if status != 200:
+    fail(f"account.refresh HTTP {status}: {refreshed}")
+status, accounts = call("GET", "/api/accounts?includeHidden=true")
+if status != 200:
+    fail(f"accounts recheck HTTP {status}: {accounts}")
+account = next(
+    (
+        item
+        for item in ((accounts.get("data") or accounts).get("accounts") or [])
+        if item.get("id") == account_id
+    ),
+    None,
+)
+if not account:
+    fail("halo-codex account missing after refresh")
+account_name = (
+    account.get("displayName")
+    or account.get("name")
+    or account.get("email")
+    or account.get("loginName")
+    or ""
+)
+if account_name.strip() in {"", "Halo Codex"} or "@" not in account_name:
+    fail(f"account display name still generic after refresh: {account_name!r}")
+ok(f"account label {account_name}")
 
 status, usage_start = call(
     "POST",
@@ -283,5 +325,39 @@ elapsed = time.time() - started
 if elapsed < long_seconds:
     fail(f"luna long chat too short: {elapsed:.1f}s < {long_seconds:.0f}s")
 ok(f"luna long chat on {luna}: {elapsed:.1f}s rounds={rounds} chars={chars}")
+
+status, stats = call("GET", "/api/stats/requests?limit=30")
+if status != 200:
+    fail(f"stats.requests HTTP {status}: {stats}")
+entries = ((stats.get("data") or stats).get("entries") or [])
+recent = next(
+    (
+        item
+        for item in entries
+        if item.get("provider") == PROVIDER and item.get("accountId") == account_id
+    ),
+    None,
+)
+if not recent:
+    fail("no recent halo-codex request in /api/stats/requests")
+provider_label = recent.get("providerLabel") or ""
+client = (recent.get("client") or "").lower()
+client_label = recent.get("clientLabel") or ""
+ua = ((recent.get("clientEvidence") or {}).get("userAgent") or "")
+logged_account = recent.get("accountName") or ""
+if provider_label != "Halo Codex":
+    fail(f"providerLabel want Halo Codex got {provider_label!r}")
+if logged_account.strip() in {"", "Halo Codex"} or "@" not in logged_account:
+    fail(f"request accountName still generic: {logged_account!r}")
+if client not in {"codex"} and "codex" not in client_label.lower():
+    fail(
+        f"client not matched as Codex: client={client!r} label={client_label!r} ua={ua!r}"
+    )
+if "codex_cli_rs" not in ua:
+    fail(f"request UA missing codex_cli_rs: {ua!r}")
+ok(
+    f"request identity provider={provider_label} account={logged_account} "
+    f"client={client_label or client}"
+)
 print("SMOKE PASS")
 PY

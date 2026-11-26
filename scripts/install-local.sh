@@ -25,7 +25,19 @@ if not key and cfg.exists():
     data = json.loads(cfg.read_text())
     key = data.get("apiKey") or data.get("api_key")
 if not key:
-    raise SystemExit("set AGENT2API_API_KEY or ~/.agent2api/config.json apiKey")
+    creds = pathlib.Path.home() / ".dsh" / ".credentials.yaml"
+    if creds.exists():
+        try:
+            import yaml  # type: ignore
+
+            refs = (yaml.safe_load(creds.read_text()) or {}).get("refs") or {}
+            key = refs.get("AGENT2API_API_KEY")
+        except Exception:
+            key = None
+if not key:
+    raise SystemExit(
+        "set AGENT2API_API_KEY, ~/.agent2api/config.json apiKey, or .dsh credentials"
+    )
 
 headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 b64 = base64.b64encode(zip_path.read_bytes()).decode()

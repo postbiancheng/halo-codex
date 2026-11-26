@@ -7,7 +7,10 @@ mod models;
 mod usage;
 
 use agent2api_wasm_sdk::{self as sdk, json, Error, Result, Value};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{
+    engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD},
+    Engine,
+};
 
 const PROVIDER: &str = "halo-codex";
 
@@ -35,7 +38,7 @@ fn metadata() -> Value {
             "usage": true,
             "credit_detail": true,
             "credit_expiry": true,
-            "identifier": ["accountId"],
+            "identifier": ["accountId", "email", "loginName"],
             "expiry": ["expiresAt", "tokenExpiresAt"]
         },
         "default_models": models::fallback(),
@@ -45,29 +48,45 @@ fn metadata() -> Value {
     sdk::error_rules::attach(meta, vec![], vec![])
 }
 
+const AUTH_CLAIMS: &str = "https://api.openai.com/auth";
+const PROFILE_CLAIMS: &str = "https://api.openai.com/profile";
+
 fn jwt_claims(token: &str) -> Option<Value> {
-    token
-        .split('.')
-        .nth(1)
-        .and_then(|v| URL_SAFE_NO_PAD.decode(v).ok())
-        .and_then(|v| serde_json::from_slice::<Value>(&v).ok())
+    let encoded = token.split('.').nth(1)?;
+    let bytes = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .or_else(|_| URL_SAFE.decode(encoded))
+        .ok()?;
+    let claims: Value = serde_json::from_slice(&bytes).ok()?;
+    claims.is_object().then_some(claims)
 }
 
-fn claim<'a>(claims: &'a Value, suffix: &str) -> Option<&'a str> {
-    let key = format!("https://api.openai.com/auth/{suffix}");
-    claims
-        .get(&key)
+fn auth_claims(claims: &Value) -> Option<&Value> {
+    claims.get(AUTH_CLAIMS).filter(|value| value.is_object())
+}
+
+fn profile_claims(claims: &Value) -> Option<&Value> {
+    claims.get(PROFILE_CLAIMS).filter(|value| value.is_object())
+}
+
+fn claim<'a>(claims: &'a Value, key: &str) -> Option<&'a str> {
+    auth_claims(claims)
+        .and_then(|auth| auth.get(key))
         .and_then(Value::as_str)
+        .map(str::trim)
         .filter(|value| !value.is_empty())
 }
 
 fn display_name(claims: &Value) -> &str {
     [
+        profile_claims(claims)
+            .and_then(|profile| profile.get("email"))
+            .and_then(Value::as_str),
+        profile_claims(claims)
+            .and_then(|profile| profile.get("name"))
+            .and_then(Value::as_str),
         claims.get("email").and_then(Value::as_str),
         claims.get("preferred_username").and_then(Value::as_str),
-        claims
-            .pointer("/https:~1~1api.openai.com~1profile/email")
-            .and_then(Value::as_str),
         claim(claims, "user_email"),
     ]
     .into_iter()
@@ -75,6 +94,14 @@ fn display_name(claims: &Value) -> &str {
     .map(str::trim)
     .find(|value| !value.is_empty())
     .unwrap_or("Halo Codex")
+}
+
+fn profile_email(claims: &Value) -> Option<&str> {
+    profile_claims(claims)
+        .and_then(|profile| profile.get("email"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 fn normalize_access(access: &str) -> Result<Value> {
@@ -100,13 +127,18 @@ fn normalize_tokens(access: &str, refresh: Option<&str>, allow_expired: bool) ->
     let user = claim(&claims, "chatgpt_user_id")
         .or_else(|| claims["sub"].as_str())
         .unwrap_or(account);
+    let name = display_name(&claims);
     let mut secret = json!({
         "accessToken": access,
         "accountId": account,
         "expiresAt": expires,
         "identity": format!("{account}:{user}"),
-        "displayName": display_name(&claims)
+        "displayName": name
     });
+    if let Some(email) = profile_email(&claims) {
+        secret["email"] = json!(email);
+        secret["loginName"] = json!(email);
+    }
     if let Some(token) = refresh {
         if token.len() < 20 {
             return Err(Error::http(400, "Codex refresh token 格式无效"));
@@ -149,12 +181,36 @@ fn parse_auth_blob(raw: &str) -> Option<(String, Option<String>)> {
 }
 
 fn public(secret: &Value) -> Value {
-    json!({
-        "name": secret["displayName"].as_str().filter(|value| !value.is_empty()).unwrap_or("Halo Codex"),
+    let claims = secret["accessToken"]
+        .as_str()
+        .and_then(jwt_claims)
+        .unwrap_or(Value::Null);
+    let email = secret["email"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| profile_email(&claims));
+    let name = secret["displayName"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "Halo Codex")
+        .or(email)
+        .or_else(|| {
+            let derived = display_name(&claims);
+            (derived != "Halo Codex").then_some(derived)
+        })
+        .unwrap_or("Halo Codex");
+    let mut view = json!({
+        "name": name,
         "accountId": secret["accountId"],
         "expiresAt": secret["expiresAt"],
         "tokenExpiresAt": secret["expiresAt"]
-    })
+    });
+    if let Some(email) = email {
+        view["email"] = json!(email);
+        view["loginName"] = json!(email);
+    }
+    view
 }
 
 fn normalize(params: &Value) -> Result<Value> {
@@ -247,6 +303,12 @@ fn handle(method: &str, mut params: Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    fn fake_access(claims: Value) -> String {
+        let payload = URL_SAFE_NO_PAD.encode(claims.to_string());
+        format!("hdr.{payload}.sig")
+    }
 
     #[test]
     fn parses_auth_json_blob() {
@@ -261,5 +323,35 @@ mod tests {
         assert_eq!(access, "aaa.bbb.ccc");
         assert_eq!(refresh.as_deref(), Some("refresh-token-value-1234567890"));
         assert!(parse_auth_blob("plain-token").is_none());
+    }
+
+    #[test]
+    fn reads_nested_auth_and_profile_claims() {
+        let exp = sdk::now() / 1000 + 3600;
+        let access = fake_access(json!({
+            "exp": exp,
+            "sub": "google-oauth2|1",
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "acct-1",
+                "chatgpt_user_id": "user-1"
+            },
+            "https://api.openai.com/profile": {
+                "email": "demo@example.com",
+                "name": "Demo User"
+            }
+        }));
+        let secret =
+            normalize_tokens(&access, Some("refresh-token-value-1234567890"), false).unwrap();
+        assert_eq!(secret["accountId"], "acct-1");
+        assert_eq!(secret["displayName"], "demo@example.com");
+        assert_eq!(secret["email"], "demo@example.com");
+        let view = public(&json!({
+            "accessToken": access,
+            "accountId": "acct-1",
+            "expiresAt": exp * 1000
+        }));
+        assert_eq!(view["name"], "demo@example.com");
+        assert_eq!(view["email"], "demo@example.com");
+        assert_eq!(view["loginName"], "demo@example.com");
     }
 }
