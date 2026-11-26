@@ -1,6 +1,6 @@
 [package]
 name = "agent2api-halo-codex"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 license = "AGPL-3.0-only"
 
@@ -12,6 +12,7 @@ agent2api-wasm-sdk = { git = "https://github.com/ProvidersPlugin/Agent2Providers
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 serde_json = "1"
+sha2 = "0.10"
 url = "2"
 
 [profile.release]

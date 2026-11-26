@@ -4,12 +4,13 @@ version = 4
 
 [[package]]
 name = "agent2api-halo-codex"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "agent2api-wasm-sdk",
  "base64",
  "chrono",
  "serde_json",
+ "sha2",
  "url",
 ]
 

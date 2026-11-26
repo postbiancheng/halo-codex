@@ -60,7 +60,8 @@ pub fn schema() -> Value {
                     { "value": "low", "label": "low" },
                     { "value": "medium", "label": "medium" },
                     { "value": "high", "label": "high" },
-                    { "value": "xhigh", "label": "xhigh" }
+                    { "value": "xhigh", "label": "xhigh" },
+                    { "value": "max", "label": "max" }
                 ]
             }
         ]
@@ -105,7 +106,7 @@ pub fn reasoning_effort() -> Result<Option<String>> {
     let value = sdk::settings::get("reasoningEffort")?;
     Ok(match value.as_str().map(str::trim).unwrap_or("") {
         "" | REASONING_AUTO => None,
-        effort if matches!(effort, "minimal" | "low" | "medium" | "high" | "xhigh") => {
+        effort if matches!(effort, "minimal" | "low" | "medium" | "high" | "xhigh" | "max") => {
             Some(effort.into())
         }
         _ => None,

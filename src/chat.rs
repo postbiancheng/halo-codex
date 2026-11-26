@@ -2,6 +2,7 @@ use super::{config, errors};
 use agent2api_wasm_sdk::{
     self as sdk, http, json, sse::SseDecoder, websocket::WebSocket, Error, Result, Value,
 };
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 fn string(value: &Value) -> &str {
@@ -89,10 +90,43 @@ fn convert_tool_choice(choice: &Value) -> Value {
     }
 }
 
-fn passthrough_input_item(message: &Value) -> Option<Value> {
-    let kind = string(&message["type"]);
-    matches!(
-        kind,
+fn shorten_call_id(id: &str) -> String {
+    let id = id.trim();
+    if id.len() <= 64 {
+        id.to_string()
+    } else {
+        format!("{:x}", Sha256::digest(id.as_bytes()))
+    }
+}
+
+fn normalize_native_item(mut item: Value) -> Result<Option<Value>> {
+    let Some(fields) = item.as_object_mut() else {
+        return Err(Error::http(400, "Halo Codex input 的每一项必须是对象"));
+    };
+    let kind = fields
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("message")
+        .to_string();
+    if kind == "item_reference" {
+        return Err(Error::http(
+            400,
+            "Codex 订阅不保存历史引用，请发送完整历史条目",
+        )
+        .with_code("codex_stateless_history_required"));
+    }
+    if kind == "reasoning" {
+        let encrypted = fields
+            .get("encrypted_content")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty());
+        if encrypted.is_none() {
+            // Plaintext reasoning is not replayable on the subscription endpoint.
+            return Ok(None);
+        }
+        fields.remove("content");
+    } else if !matches!(
+        kind.as_str(),
         "message"
             | "function_call"
             | "function_call_output"
@@ -102,15 +136,136 @@ fn passthrough_input_item(message: &Value) -> Option<Value> {
             | "local_shell_call"
             | "local_shell_call_output"
             | "additional_tools"
-    )
-    .then(|| message.clone())
+            | "tool_search_call"
+            | "tool_search_output"
+    ) {
+        return Ok(None);
+    }
+
+    let notification = matches!(
+        kind.as_str(),
+        "function_call_output" | "custom_tool_call_output"
+    ) && fields
+        .get("call_id")
+        .and_then(Value::as_str)
+        .is_none_or(|value| value.is_empty());
+    if !notification {
+        fields.remove("id");
+        if matches!(kind.as_str(), "message" | "reasoning") {
+            fields.remove("status");
+        }
+    }
+    if matches!(
+        kind.as_str(),
+        "function_call"
+            | "function_call_output"
+            | "local_shell_call"
+            | "local_shell_call_output"
+            | "custom_tool_call"
+            | "custom_tool_call_output"
+            | "tool_search_call"
+            | "tool_search_output"
+    ) {
+        if let Some(id) = fields.get("call_id").and_then(Value::as_str) {
+            let shortened = shorten_call_id(id);
+            if shortened != id {
+                fields.insert("call_id".into(), json!(shortened));
+            }
+        }
+    }
+    if kind == "message" && fields.get("role").and_then(Value::as_str) == Some("system") {
+        fields.insert("role".into(), json!("developer"));
+    }
+    Ok(Some(item))
+}
+
+fn passthrough_input_item(message: &Value) -> Result<Option<Value>> {
+    let kind = string(&message["type"]);
+    if kind.is_empty() {
+        return Ok(None);
+    }
+    normalize_native_item(message.clone())
+}
+
+fn ensure_encrypted_include(output: &mut Value) {
+    let active = output
+        .get("reasoning")
+        .and_then(|value| value.get("effort"))
+        .and_then(Value::as_str)
+        .is_some_and(|effort| !matches!(effort, "" | "none" | "off"));
+    if !active {
+        return;
+    }
+    if let Some(fields) = output["reasoning"].as_object_mut() {
+        fields
+            .entry("summary".to_string())
+            .or_insert_with(|| json!("auto"));
+    }
+    let include = output
+        .as_object_mut()
+        .map(|fields| fields.entry("include".to_string()).or_insert_with(|| json!([])));
+    let Some(Value::Array(include)) = include else {
+        return;
+    };
+    if !include
+        .iter()
+        .any(|value| value.as_str() == Some("reasoning.encrypted_content"))
+    {
+        include.push(json!("reasoning.encrypted_content"));
+    }
+}
+
+fn declare_search(output: &mut Value) {
+    let Some(items) = output["input"].as_array() else {
+        return;
+    };
+    if !items
+        .iter()
+        .any(|item| string(&item["type"]) == "web_search_call")
+    {
+        return;
+    }
+    let mut tools = output["tools"].as_array().cloned().unwrap_or_default();
+    let already = tools.iter().any(|tool| {
+        let kind = string(&tool["type"]);
+        kind.starts_with("web_search")
+            || (kind == "function" && string(&tool["name"]) == "web.run")
+            || (kind == "namespace" && string(&tool["name"]) == "web")
+    });
+    if already {
+        return;
+    }
+    tools.push(json!({ "type": "web_search", "external_web_access": false }));
+    output["tools"] = Value::Array(tools);
+}
+
+fn reject_stateless_history(body: &Value) -> Result<()> {
+    for key in ["previous_response_id", "conversation", "prompt"] {
+        if body
+            .get(key)
+            .is_some_and(|value| !value.is_null() && value.as_str() != Some(""))
+        {
+            return Err(Error::http(
+                400,
+                format!("Codex 订阅不保存服务端历史，不能使用 {key}，请在 messages/input 中发送完整历史"),
+            )
+            .with_code("codex_stateless_history_required"));
+        }
+    }
+    if body.get("background").and_then(Value::as_bool) == Some(true) {
+        return Err(Error::http(
+            400,
+            "Codex 订阅不支持后台生成，请使用普通流式请求",
+        ));
+    }
+    Ok(())
 }
 
 fn input_messages(messages: &[Value], include_instructions: bool) -> Result<(String, Vec<Value>)> {
     let mut instructions = Vec::new();
     let mut items = Vec::new();
     for message in messages {
-        if let Some(item) = passthrough_input_item(message) {
+        if let Some(item) = passthrough_input_item(message)? {
             items.push(item);
             continue;
         }
@@ -126,7 +281,9 @@ fn input_messages(messages: &[Value], include_instructions: bool) -> Result<(Str
                 let call_id = message
                     .get("tool_call_id")
                     .or_else(|| message.get("call_id"))
-                    .cloned()
+                    .and_then(Value::as_str)
+                    .map(shorten_call_id)
+                    .map(Value::String)
                     .unwrap_or(Value::Null);
                 let kind = if string(&message["type"]) == "custom_tool_call_output" {
                     "custom_tool_call_output"
@@ -165,18 +322,24 @@ fn input_messages(messages: &[Value], include_instructions: bool) -> Result<(Str
                 if role == "assistant" {
                     for call in message["tool_calls"].as_array().into_iter().flatten() {
                         let call_type = string(&call["type"]);
+                        let call_id = call
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .map(shorten_call_id)
+                            .map(Value::String)
+                            .unwrap_or(Value::Null);
                         if call_type == "custom" || call.get("custom").is_some_and(Value::is_object) {
                             let custom = call.get("custom").unwrap_or(call);
                             items.push(json!({
                                 "type":"custom_tool_call",
-                                "call_id": call.get("id").cloned().unwrap_or(Value::Null),
+                                "call_id": call_id,
                                 "name": custom.get("name").cloned().unwrap_or(Value::Null),
                                 "input": custom.get("input").or_else(|| custom.get("arguments")).cloned().unwrap_or(json!("")),
                             }));
                         } else {
                             items.push(json!({
                                 "type":"function_call",
-                                "call_id": call.get("id").cloned().unwrap_or(Value::Null),
+                                "call_id": call_id,
                                 "name": call.pointer("/function/name").cloned().unwrap_or(Value::Null),
                                 "arguments": call.pointer("/function/arguments").cloned().unwrap_or(json!("")),
                             }));
@@ -195,11 +358,14 @@ fn input(body: &Value) -> Result<(String, Vec<Value>)> {
         let instructions = body["instructions"].as_str().unwrap_or("").to_string();
         let mut normalized = Vec::with_capacity(items.len());
         for item in items {
-            if let Some(pass) = passthrough_input_item(item) {
+            if let Some(pass) = passthrough_input_item(item)? {
                 normalized.push(pass);
             } else if item.get("role").is_some() {
                 let (_ignored, mut rows) = input_messages(std::slice::from_ref(item), false)?;
                 normalized.append(&mut rows);
+            } else if string(&item["type"]) == "reasoning" {
+                // Plaintext reasoning already dropped by normalize_native_item.
+                continue;
             } else {
                 return Err(Error::http(400, "Halo Codex input 条目缺少有效 type"));
             }
@@ -215,6 +381,7 @@ fn input(body: &Value) -> Result<(String, Vec<Value>)> {
 fn request(body: &Value, session: &str, websocket: bool) -> Result<Value> {
     // Codex backend currently rejects store=true ("Store must be set to false"),
     // so previous_response_id chaining is unavailable on this endpoint.
+    reject_stateless_history(body)?;
     let (instructions, items) = input(body)?;
     let mut output = if websocket {
         json!({"type":"response.create","model":body["model"],"instructions":instructions,
@@ -232,7 +399,17 @@ fn request(body: &Value, session: &str, websocket: bool) -> Result<Value> {
     if let Some(value) = body.get("parallel_tool_calls") {
         output["parallel_tool_calls"] = value.clone();
     }
+    if let Some(include) = body["include"].as_array() {
+        output["include"] = Value::Array(include.clone());
+    }
+    if let Some(tier) = body["service_tier"].as_str() {
+        if matches!(tier, "priority" | "ultrafast") {
+            output["service_tier"] = json!(tier);
+        }
+    }
     apply_reasoning(body, config::reasoning_effort()?.as_deref(), &mut output);
+    ensure_encrypted_include(&mut output);
+    declare_search(&mut output);
     if let Some(format) = body.get("response_format") {
         output["text"] = if format["type"] == "json_schema" {
             let mut schema = format["json_schema"]
@@ -630,5 +807,36 @@ mod tests {
         assert_eq!(chat_items[0]["type"], "function_call");
         assert_eq!(chat_items[1]["type"], "custom_tool_call");
         assert_eq!(chat_items[2]["type"], "function_call_output");
+    }
+
+    #[test]
+    fn drops_plaintext_reasoning_keeps_encrypted_and_declares_search() {
+        let err = reject_stateless_history(&json!({"previous_response_id":"resp_1"})).unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("codex_stateless_history_required"));
+
+        let (_, items) = input(&json!({
+            "input": [
+                {"type":"reasoning","content":[{"type":"summary_text","text":"think"}]},
+                {"type":"reasoning","encrypted_content":"enc-1"},
+                {"type":"web_search_call","id":"ws1"},
+                {"type":"message","role":"system","content":[{"type":"input_text","text":"x"}]}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0]["type"], "reasoning");
+        assert_eq!(items[0]["encrypted_content"], "enc-1");
+        assert!(items[0].get("content").is_none());
+        assert_eq!(items[2]["role"], "developer");
+
+        let mut output = json!({
+            "input": items,
+            "reasoning": {"effort": "medium"}
+        });
+        ensure_encrypted_include(&mut output);
+        declare_search(&mut output);
+        assert_eq!(output["include"][0], "reasoning.encrypted_content");
+        assert_eq!(output["reasoning"]["summary"], "auto");
+        assert_eq!(output["tools"][0]["type"], "web_search");
     }
 }
