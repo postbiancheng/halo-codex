@@ -23,7 +23,7 @@ fn login_methods() -> Value {
 }
 
 fn metadata() -> Value {
-    json!({
+    let meta = json!({
         "id": PROVIDER, "label": "Halo Codex", "order": 46,
         "capabilities": {"chat": true, "stateful": true, "supports_default_model": false,
             "web_login":true,"refresh":true,"refresh_uses_account":true,"usage":true,
@@ -38,7 +38,8 @@ fn metadata() -> Value {
         "default_models": models::fallback(),
         "settings_schema": config::schema(),
         "settings_group": { "label": "Halo Codex" }
-    })
+    });
+    sdk::error_rules::attach(meta, vec![], vec![])
 }
 
 fn normalize_access(access: &str) -> Result<Value> {
@@ -93,6 +94,23 @@ fn normalized(secret: Value) -> Value {
     json!({"identity":secret["identity"],"public":public(&secret),"secret":secret,"desktop":false})
 }
 
+fn status(params: &Value) -> u16 {
+    params["status"]
+        .as_u64()
+        .and_then(|value| u16::try_from(value).ok())
+        .unwrap_or(502)
+}
+
+fn admin(params: &Value) -> Result<Value> {
+    let payload = &params["payload"];
+    match params["action"].as_str().unwrap_or("") {
+        "auth.methods" => Ok(login_methods()),
+        "quota.sources" => Ok(usage::sources(payload.get("report").unwrap_or(payload))),
+        "network.user-agent" => Ok(json!({ "accountWide": false })),
+        _ => Err(Error::unsupported()),
+    }
+}
+
 fn handle(method: &str, mut params: Value) -> Result<Value> {
     match method {
         "init" => Ok(json!([metadata()])),
@@ -103,7 +121,7 @@ fn handle(method: &str, mut params: Value) -> Result<Value> {
         "account.identity" => Ok(params["secret"]["identity"].clone()),
         "models.list" => models::list(&params),
         "models.refresh" => models::refresh(&params),
-        "admin.action" if params["action"] == "auth.methods" => Ok(login_methods()),
+        "admin.action" => admin(&params),
         "usage.query" => usage::query(),
         "conversation" => {
             let account = auth::credentials(false)?;
@@ -118,21 +136,12 @@ fn handle(method: &str, mut params: Value) -> Result<Value> {
         "login.start" => auth::start(&params),
         "login.poll" => auth::poll(),
         "login.cancel" => auth::cancel(),
-        "reasoning_patch" => Ok(json!({"kind":"none"})),
-        "classify" => Ok(errors::classify(
-            params["status"]
-                .as_u64()
-                .and_then(|value| u16::try_from(value).ok())
-                .unwrap_or(502),
-            &params["body"],
-        )),
-        "error.policy" => Ok(errors::policy(
-            params["status"]
-                .as_u64()
-                .and_then(|value| u16::try_from(value).ok())
-                .unwrap_or(502),
-            &params["body"],
-        )),
+        "reasoning_patch" => Ok(models::reasoning_patch(&params)),
+        "is_error_response" => Ok(json!(errors::is_error_response(&params))),
+        "refusal_markers" => Ok(json!({ "finishes": ["content_filter"], "markers": [] })),
+        "cooldown_models" => Ok(json!({ "models": [] })),
+        "classify" => Ok(errors::classify(status(&params), &params["body"])),
+        "error.policy" => Ok(errors::policy(status(&params), &params["body"])),
         "retry.decision" => Ok(errors::retry(&params)),
         "retry_advice" => Ok(errors::advice(&params)),
         "images.capabilities" => Ok(json!({ "generation": true, "editing": true })),

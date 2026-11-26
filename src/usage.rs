@@ -123,6 +123,15 @@ pub fn query() -> Result<Value> {
     Ok(parsed)
 }
 
+/// Host `admin.action` → `quota.sources` wallet breakdown from a usage report.
+pub fn sources(report: &Value) -> Value {
+    report
+        .get("quotaSources")
+        .filter(|value| value.is_array())
+        .cloned()
+        .unwrap_or_else(|| json!([]))
+}
+
 fn text<'a>(value: &'a Value, fields: &[&str]) -> &'a str {
     fields
         .iter()

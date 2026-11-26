@@ -260,13 +260,25 @@ impl Stream<'_> {
     }
 }
 
+fn normalize_effort(effort: &str) -> &str {
+    if effort.eq_ignore_ascii_case("ultra") {
+        "max"
+    } else {
+        effort
+    }
+}
+
 fn apply_reasoning(body: &Value, default_effort: Option<&str>, output: &mut Value) {
     if let Some(effort) = body["reasoning_effort"].as_str() {
-        output["reasoning"] = json!({"effort": effort});
+        output["reasoning"] = json!({"effort": normalize_effort(effort)});
     } else if body["reasoning"].is_object() {
-        output["reasoning"] = body["reasoning"].clone();
+        let mut reasoning = body["reasoning"].clone();
+        if let Some(effort) = reasoning["effort"].as_str() {
+            reasoning["effort"] = json!(normalize_effort(effort));
+        }
+        output["reasoning"] = reasoning;
     } else if let Some(effort) = default_effort {
-        output["reasoning"] = json!({"effort": effort});
+        output["reasoning"] = json!({"effort": normalize_effort(effort)});
     }
 }
 
@@ -444,6 +456,9 @@ mod tests {
         let mut output = json!({});
         apply_reasoning(&json!({}), None, &mut output);
         assert!(output.get("reasoning").is_none());
+
+        apply_reasoning(&json!({"reasoning_effort": "ultra"}), None, &mut output);
+        assert_eq!(output["reasoning"]["effort"], "max");
     }
 
 }

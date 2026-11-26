@@ -34,7 +34,7 @@ Provider id：`halo-codex`。
 python3 - <<'PY'
 import base64, json, urllib.request, os
 key = os.environ["AGENT2API_API_KEY"]
-zip_path = "dist/agent2api-wasm-halo-codex-0.2.0.zip"
+zip_path = "dist/agent2api-wasm-halo-codex-0.2.1.zip"
 body = json.dumps({"packB64": base64.b64encode(open(zip_path, "rb").read()).decode()}).encode()
 req = urllib.request.Request(
     "http://127.0.0.1:3065/api/plugins/install",
@@ -53,3 +53,4 @@ PY
 - **0.1.12**：错误分类与重试（上游强制 `store=false`，暂无 previous_response_id 会话链）
 - **0.1.13**：图片生成/编辑
 - **0.2.0**：更名 Halo Codex（provider `halo-codex`），接入 OpenAI 风格 SVG 图标
+- **0.2.1**：宿主控制面补齐（`is_error_response` / `refusal_markers` / `quota.sources`）、真实 `reasoning_patch`、`error_rules`

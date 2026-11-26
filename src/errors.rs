@@ -238,6 +238,41 @@ pub fn advice(params: &Value) -> Value {
     }
 }
 
+fn header<'a>(params: &'a Value, name: &str) -> &'a str {
+    let headers = &params["headers"];
+    if let Some(map) = headers.as_object() {
+        for (key, value) in map {
+            if key.eq_ignore_ascii_case(name) {
+                return value.as_str().unwrap_or_default();
+            }
+        }
+    }
+    ""
+}
+
+/// Host invokes this before classifying streamed upstream failures.
+/// Mirrors built-in Codex: non-2xx, or HTTP 200 with `application/json`
+/// (successful SSE uses `text/event-stream`).
+pub fn is_error_response(params: &Value) -> bool {
+    let status = params["status"].as_u64().unwrap_or(502);
+    if !(200..300).contains(&status) {
+        return true;
+    }
+    let content_type = header(params, "content-type");
+    let mime = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim();
+    if mime.eq_ignore_ascii_case("application/json") {
+        return true;
+    }
+    let body = &params["body"];
+    body.get("error").is_some_and(|value| !value.is_null())
+        || body["type"] == "error"
+        || body["success"] == false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,5 +291,24 @@ mod tests {
             &json!({"error":{"message":"Blocked by safety system","code":"content_filter"}}),
         );
         assert_eq!(blocked["kind"], "content_blocked");
+    }
+
+    #[test]
+    fn detects_json_error_envelope_on_200() {
+        assert!(is_error_response(&json!({
+            "status": 200,
+            "headers": { "content-type": "application/json; charset=utf-8" },
+            "body": {}
+        })));
+        assert!(!is_error_response(&json!({
+            "status": 200,
+            "headers": { "Content-Type": "text/event-stream" },
+            "body": {}
+        })));
+        assert!(is_error_response(&json!({
+            "status": 502,
+            "headers": {},
+            "body": {}
+        })));
     }
 }

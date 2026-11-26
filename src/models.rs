@@ -260,6 +260,10 @@ fn parse(report: &Value) -> Result<Vec<Value>> {
             .or_else(|| item.get("supported_reasoning_efforts"))
         {
             row["reasoning"] = levels.clone();
+            let names = reasoning_level_names(levels);
+            if !names.is_empty() {
+                row["reasoningLevels"] = Value::Array(names.into_iter().map(Value::String).collect());
+            }
         }
         if let Some(default) = text(
             item,
@@ -274,6 +278,144 @@ fn parse(report: &Value) -> Result<Vec<Value>> {
         models.push(row);
     }
     Ok(models)
+}
+
+fn reasoning_level_names(levels: &Value) -> Vec<String> {
+    let Some(items) = levels.as_array() else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for item in items {
+        let name = item
+            .as_str()
+            .or_else(|| item["effort"].as_str())
+            .or_else(|| item["level"].as_str())
+            .or_else(|| item["name"].as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if let Some(name) = name {
+            let normalized = if name.eq_ignore_ascii_case("ultra") {
+                "max".to_string()
+            } else {
+                name.to_ascii_lowercase()
+            };
+            if !names.iter().any(|existing| existing == &normalized) {
+                names.push(normalized);
+            }
+        }
+    }
+    names
+}
+
+fn catalog_levels_for(model: &str) -> Option<Vec<String>> {
+    if model.is_empty() {
+        return None;
+    }
+    let catalog = cached_for(&sdk::account().ok()?["secret"]).or_else(|| {
+        sdk::catalog::cached()
+            .ok()
+            .filter(|value| value["models"].is_array())
+    })?;
+    let row = catalog["models"].as_array()?.iter().find(|row| {
+        row["id"]
+            .as_str()
+            .is_some_and(|id| id.eq_ignore_ascii_case(model))
+    })?;
+    row.get("reasoningLevels")
+        .and_then(Value::as_array)
+        .map(|levels| {
+            levels
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .filter(|levels| !levels.is_empty())
+        .or_else(|| {
+            row.get("reasoning")
+                .map(reasoning_level_names)
+                .filter(|levels| !levels.is_empty())
+        })
+}
+
+/// Host model-rule binding → inject `reasoning_effort` / `reasoning.effort`.
+pub fn reasoning_patch(params: &Value) -> Value {
+    let body = &params["body"];
+    let client_set = body
+        .get("reasoning_effort")
+        .is_some_and(|value| !value.is_null())
+        || body
+            .get("reasoning")
+            .and_then(|value| value.get("effort"))
+            .is_some_and(|value| !value.is_null());
+    if client_set {
+        return json!({
+            "action": "skip",
+            "reason": "客户端已指定思考档位，绑定不覆盖"
+        });
+    }
+
+    let raw = params["level"].as_str().unwrap_or("").trim();
+    if raw.is_empty()
+        || raw.eq_ignore_ascii_case("off")
+        || raw.eq_ignore_ascii_case("none")
+        || raw.eq_ignore_ascii_case("auto")
+    {
+        return json!({
+            "action": "skip",
+            "reason": "关闭或自动思考的绑定保持客户端/插件默认设置"
+        });
+    }
+    let level = if raw.eq_ignore_ascii_case("ultra") {
+        "max".to_string()
+    } else {
+        raw.to_ascii_lowercase()
+    };
+
+    let model = params["model"]
+        .as_str()
+        .or_else(|| body["model"].as_str())
+        .unwrap_or("");
+    match catalog_levels_for(model) {
+        Some(levels) if !levels.iter().any(|known| known.eq_ignore_ascii_case(&level)) => {
+            return json!({
+                "action": "skip",
+                "reason": "Codex 账号目录尚未声明这个思考等级"
+            });
+        }
+        None
+            if !["minimal", "low", "medium", "high", "xhigh", "max"]
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(&level)) =>
+        {
+            return json!({
+                "action": "skip",
+                "reason": "此档位不在通用候选内，模型目录未确认支持"
+            });
+        }
+        _ => {}
+    }
+
+    // Responses-shaped bodies already use `input` / `reasoning.effort`.
+    if body.get("input").is_some() && body.get("messages").is_none() {
+        let mut reasoning = body
+            .get("reasoning")
+            .filter(|value| value.is_object())
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        reasoning["effort"] = json!(level);
+        return json!({
+            "action": "set",
+            "field": "reasoning",
+            "value": reasoning
+        });
+    }
+
+    json!({
+        "action": "set",
+        "field": "reasoning_effort",
+        "value": level
+    })
 }
 
 #[cfg(test)]
@@ -301,7 +443,33 @@ mod tests {
         assert_eq!(models[0]["id"], "gpt-6.2-sol");
         assert_eq!(models[0]["capabilities"]["maxInputTokens"], 872000);
         assert_eq!(models[0]["defaultReasoning"], "low");
+        assert_eq!(models[0]["reasoningLevels"], json!(["low"]));
         assert_eq!(models[1]["id"], "gpt-6-luna");
         assert_eq!(models[1]["name"], "Luna");
+    }
+
+    #[test]
+    fn reasoning_patch_sets_or_skips() {
+        let skip = reasoning_patch(&json!({
+            "level": "high",
+            "body": { "reasoning_effort": "low", "model": "gpt-6.2-sol" }
+        }));
+        assert_eq!(skip["action"], "skip");
+
+        let set = reasoning_patch(&json!({
+            "level": "ultra",
+            "body": { "model": "unknown-model", "messages": [] }
+        }));
+        assert_eq!(set["action"], "set");
+        assert_eq!(set["field"], "reasoning_effort");
+        assert_eq!(set["value"], "max");
+
+        let responses = reasoning_patch(&json!({
+            "level": "medium",
+            "body": { "model": "x", "input": [] }
+        }));
+        assert_eq!(responses["action"], "set");
+        assert_eq!(responses["field"], "reasoning");
+        assert_eq!(responses["value"]["effort"], "medium");
     }
 }
