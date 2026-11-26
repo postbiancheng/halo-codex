@@ -55,7 +55,41 @@ fn model(id: &str, name: &str, limit: i64) -> Value {
 }
 
 fn catalog(models: Value, remote: bool, refreshed_at: i64) -> Value {
-    json!({ "models": models, "meta": { "remote": remote, "refreshed_at": refreshed_at } })
+    catalog_with_profiles(models, json!({}), remote, refreshed_at)
+}
+
+fn catalog_with_profiles(
+    models: Value,
+    profiles: Value,
+    remote: bool,
+    refreshed_at: i64,
+) -> Value {
+    json!({
+        "models": models,
+        "meta": {
+            "remote": remote,
+            "refreshed_at": refreshed_at,
+            "profiles": profiles
+        }
+    })
+}
+
+/// Private Codex catalog profile used when building upstream requests.
+pub fn profile_for(model: &str) -> Option<Value> {
+    if model.is_empty() {
+        return None;
+    }
+    let catalog = cached_for(&sdk::account().ok()?["secret"]).or_else(|| {
+        sdk::catalog::cached()
+            .ok()
+            .filter(|value| value["models"].is_array())
+    })?;
+    catalog
+        .pointer("/meta/profiles")?
+        .as_object()?
+        .iter()
+        .find(|(id, _)| id.eq_ignore_ascii_case(model))
+        .map(|(_, value)| value.clone())
 }
 
 fn load() -> Result<state::Snapshot> {
@@ -158,8 +192,8 @@ pub fn refresh(params: &Value) -> Result<Value> {
         }
     };
 
-    let models = match parse(&report) {
-        Ok(models) if !models.is_empty() => models,
+    let (models, profiles) = match parse(&report) {
+        Ok((models, profiles)) if !models.is_empty() => (models, profiles),
         Ok(_) => {
             return Ok(json!({
                 "refreshed": false,
@@ -186,7 +220,7 @@ pub fn refresh(params: &Value) -> Result<Value> {
     }
 
     let models = with_image_models(models);
-    let catalog = catalog(Value::Array(models.clone()), true, sdk::now());
+    let catalog = catalog_with_profiles(Value::Array(models.clone()), profiles, true, sdk::now());
     let before = load()?;
     let _ = state::compare_exchange(
         Scope::Account,
@@ -227,11 +261,12 @@ fn items(report: &Value) -> Option<&Vec<Value>> {
         .or_else(|| report.pointer("/catalog/models")?.as_array())
 }
 
-fn parse(report: &Value) -> Result<Vec<Value>> {
+fn parse(report: &Value) -> Result<(Vec<Value>, Value)> {
     let Some(items) = items(report) else {
         return Err(Error::http(502, "Codex 模型目录格式无效"));
     };
     let mut models = Vec::new();
+    let mut profiles = serde_json::Map::new();
     for item in items {
         let visibility = item["visibility"].as_str().unwrap_or("list");
         if matches!(visibility, "hide" | "hidden") {
@@ -252,8 +287,15 @@ fn parse(report: &Value) -> Result<Vec<Value>> {
             })
             .unwrap_or_else(|| context_limit(item));
         let mut row = model(id, name, limit);
+        row["protocol"] = json!("responses");
+        row["supportsToolCall"] = json!(true);
         if let Some(description) = text(item, &["description"]) {
             row["description"] = json!(description);
+        }
+        if let Some(modalities) = item.get("input_modalities").and_then(Value::as_array) {
+            let images = modalities.iter().any(|value| value.as_str() == Some("image"));
+            row["supportsImages"] = json!(images);
+            row["capabilities"]["supportsImages"] = json!(images);
         }
         if let Some(levels) = item
             .get("supported_reasoning_levels")
@@ -262,7 +304,9 @@ fn parse(report: &Value) -> Result<Vec<Value>> {
             row["reasoning"] = levels.clone();
             let names = reasoning_level_names(levels);
             if !names.is_empty() {
-                row["reasoningLevels"] = Value::Array(names.into_iter().map(Value::String).collect());
+                row["supportsReasoning"] = json!(true);
+                row["reasoningLevels"] =
+                    Value::Array(names.into_iter().map(Value::String).collect());
             }
         }
         if let Some(default) = text(
@@ -274,10 +318,38 @@ fn parse(report: &Value) -> Result<Vec<Value>> {
             ],
         ) {
             row["defaultReasoning"] = json!(default);
+            row["reasoningDefaultLevel"] = json!(default);
+        }
+        if let Some(tiers) = item.get("service_tiers").and_then(Value::as_array) {
+            let ids: Vec<Value> = tiers
+                .iter()
+                .filter_map(|tier| tier.get("id").cloned())
+                .collect();
+            if !ids.is_empty() {
+                row["serviceTiers"] = Value::Array(ids);
+            }
+        }
+        let mut profile = json!({});
+        if let Some(instructions) = text(item, &["base_instructions", "baseInstructions"]) {
+            profile["baseInstructions"] = json!(instructions);
+        }
+        if item
+            .get("support_verbosity")
+            .or_else(|| item.get("supports_verbosity"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            profile["supportVerbosity"] = json!(true);
+            if let Some(verbosity) = text(item, &["default_verbosity", "defaultVerbosity"]) {
+                profile["defaultVerbosity"] = json!(verbosity);
+            }
+        }
+        if profile.as_object().is_some_and(|object| !object.is_empty()) {
+            profiles.insert(id.to_string(), profile);
         }
         models.push(row);
     }
-    Ok(models)
+    Ok((models, Value::Object(profiles)))
 }
 
 fn reasoning_level_names(levels: &Value) -> Vec<String> {
@@ -424,7 +496,7 @@ mod tests {
 
     #[test]
     fn parses_codex_catalog() {
-        let models = parse(&json!({
+        let (models, profiles) = parse(&json!({
             "models": [
                 {
                     "slug": "gpt-6.2-sol",
@@ -432,7 +504,12 @@ mod tests {
                     "context_window": 500000,
                     "max_context_window": 872000,
                     "default_reasoning_level": "low",
-                    "supported_reasoning_levels": [{"effort":"low"}]
+                    "supported_reasoning_levels": [{"effort":"low"}],
+                    "input_modalities": ["text", "image"],
+                    "service_tiers": [{"id":"priority"}],
+                    "base_instructions": "stay concise",
+                    "support_verbosity": true,
+                    "default_verbosity": "medium"
                 },
                 { "slug": "hidden", "visibility": "hide" },
                 { "id": "gpt-6-luna", "name": "Luna" }
@@ -444,6 +521,10 @@ mod tests {
         assert_eq!(models[0]["capabilities"]["maxInputTokens"], 872000);
         assert_eq!(models[0]["defaultReasoning"], "low");
         assert_eq!(models[0]["reasoningLevels"], json!(["low"]));
+        assert_eq!(models[0]["supportsImages"], true);
+        assert_eq!(models[0]["serviceTiers"], json!(["priority"]));
+        assert_eq!(profiles["gpt-6.2-sol"]["baseInstructions"], "stay concise");
+        assert_eq!(profiles["gpt-6.2-sol"]["defaultVerbosity"], "medium");
         assert_eq!(models[1]["id"], "gpt-6-luna");
         assert_eq!(models[1]["name"], "Luna");
     }

@@ -1,4 +1,4 @@
-use super::{config, errors};
+use super::{config, errors, models};
 use agent2api_wasm_sdk::{
     self as sdk, http, json, sse::SseDecoder, websocket::WebSocket, Error, Result, Value,
 };
@@ -378,11 +378,35 @@ fn input(body: &Value) -> Result<(String, Vec<Value>)> {
     input_messages(messages, true)
 }
 
+fn apply_catalog_defaults(body: &Value, instructions: &mut String, output: &mut Value) {
+    let model = string(&body["model"]);
+    let Some(profile) = models::profile_for(model) else {
+        return;
+    };
+    if instructions.trim().is_empty() {
+        if let Some(base) = profile["baseInstructions"].as_str().filter(|value| !value.is_empty()) {
+            *instructions = base.to_string();
+            output["instructions"] = json!(base);
+        }
+    }
+    if output.get("text").is_none()
+        && body.get("response_format").is_none()
+        && profile["supportVerbosity"] == true
+    {
+        if let Some(verbosity) = profile["defaultVerbosity"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+        {
+            output["text"] = json!({ "verbosity": verbosity });
+        }
+    }
+}
+
 fn request(body: &Value, session: &str, websocket: bool) -> Result<Value> {
     // Codex backend currently rejects store=true ("Store must be set to false"),
     // so previous_response_id chaining is unavailable on this endpoint.
     reject_stateless_history(body)?;
-    let (instructions, items) = input(body)?;
+    let (mut instructions, items) = input(body)?;
     let mut output = if websocket {
         json!({"type":"response.create","model":body["model"],"instructions":instructions,
             "input":items,"stream":true,"store":false,"parallel_tool_calls":true})
@@ -390,6 +414,7 @@ fn request(body: &Value, session: &str, websocket: bool) -> Result<Value> {
         json!({"model":body["model"],"instructions":instructions,
             "input":items,"stream":true,"store":false,"parallel_tool_calls":true})
     };
+    apply_catalog_defaults(body, &mut instructions, &mut output);
     if let Some(tools) = body["tools"].as_array() {
         output["tools"] = json!(convert_tools(tools)?);
     }
@@ -583,7 +608,7 @@ fn apply_reasoning(body: &Value, default_effort: Option<&str>, output: &mut Valu
     }
 }
 
-fn auth_headers(secret: &Value, request_id: &str) -> Result<Value> {
+fn auth_headers(secret: &Value, request_id: &str, websocket: bool) -> Result<Value> {
     let token = string(&secret["accessToken"]);
     let account = string(&secret["accountId"]);
     if token.is_empty()
@@ -592,15 +617,25 @@ fn auth_headers(secret: &Value, request_id: &str) -> Result<Value> {
     {
         return Err(Error::http(401, "Codex 登录已过期").with_code("codex_login_required"));
     }
-    Ok(json!({
+    let originator = config::originator(true)?;
+    let version = config::client_version()?;
+    let mut headers = json!({
         "Authorization": format!("Bearer {token}"),
         "chatgpt-account-id": account,
         "ChatGPT-Account-Id": account,
-        "originator": config::originator(true)?,
-        "OpenAI-Beta": "responses_websockets=2026-02-06",
+        "originator": originator,
+        "User-Agent": format!("{originator}/{version}"),
+        "version": version,
         "session-id": request_id,
+        "thread-id": request_id,
         "x-client-request-id": request_id
-    }))
+    });
+    headers["OpenAI-Beta"] = json!(if websocket {
+        "responses_websockets=2026-02-06"
+    } else {
+        "responses=experimental"
+    });
+    Ok(headers)
 }
 
 fn session_key(body: &Value, params: &Value) -> String {
@@ -628,7 +663,6 @@ fn request_id(session: &str) -> Result<String> {
 pub fn forward(body: Value, params: &Value, secret: &Value) -> Result<()> {
     let session = session_key(&body, params);
     let request_id = request_id(&session)?;
-    let headers = auth_headers(secret, &request_id)?;
     let model = string(&body["model"]).to_string();
     let mut stream = Stream {
         model: &model,
@@ -636,8 +670,14 @@ pub fn forward(body: Value, params: &Value, secret: &Value) -> Result<()> {
         tools: BTreeMap::new(),
     };
     match config::transport()?.as_str() {
-        config::TRANSPORT_HTTP => forward_http(body, &session, headers, &mut stream),
-        _ => forward_ws(body, &session, headers, &mut stream),
+        config::TRANSPORT_HTTP => {
+            let headers = auth_headers(secret, &request_id, false)?;
+            forward_http(body, &session, headers, &mut stream)
+        }
+        _ => {
+            let headers = auth_headers(secret, &request_id, true)?;
+            forward_ws(body, &session, headers, &mut stream)
+        }
     }
 }
 

@@ -114,26 +114,32 @@ pub fn classify(status: u16, body: &Value) -> Value {
         });
     }
 
-    let quota = matches!(
-        code.as_str(),
-        "insufficient_quota"
-            | "quota_exceeded"
-            | "billing_not_active"
-            | "usage_limit_exceeded"
-            | "rate_limit_exceeded"
-    ) || [
-        "insufficient quota",
-        "quota exceeded",
-        "usage limit",
-        "rate limit",
-        "too many requests",
-        "额度",
-        "用量已用完",
-        "速率限制",
-    ]
-    .iter()
-    .any(|part| lower.contains(part))
-        || status == 429;
+    let quota = status == 429
+        || status == 402
+        || (status == 403 && code == "usage_not_included")
+        || matches!(
+            code.as_str(),
+            "insufficient_quota"
+                | "quota_exceeded"
+                | "billing_not_active"
+                | "usage_limit_exceeded"
+                | "usage_limit_reached"
+                | "rate_limit_exceeded"
+                | "rate_limit_reached"
+                | "usage_not_included"
+        )
+        || [
+            "insufficient quota",
+            "quota exceeded",
+            "usage limit",
+            "rate limit",
+            "too many requests",
+            "额度",
+            "用量已用完",
+            "速率限制",
+        ]
+        .iter()
+        .any(|part| lower.contains(part));
 
     if quota {
         let transient = status == 429
@@ -291,6 +297,12 @@ mod tests {
             &json!({"error":{"message":"Blocked by safety system","code":"content_filter"}}),
         );
         assert_eq!(blocked["kind"], "content_blocked");
+
+        let excluded = classify(
+            403,
+            &json!({"error":{"message":"Usage not included","code":"usage_not_included"}}),
+        );
+        assert_eq!(excluded["kind"], "quota_limited");
     }
 
     #[test]

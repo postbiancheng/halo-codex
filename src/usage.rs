@@ -10,7 +10,7 @@ fn headers(access: &str, account: &str) -> Value {
         "Authorization": format!("Bearer {access}"),
         "ChatGPT-Account-Id": account,
         "originator": originator,
-        "User-Agent": concat!("Agent2API-Codex-WebSocket/", env!("CARGO_PKG_VERSION")),
+        "User-Agent": concat!("Halo-Codex/", env!("CARGO_PKG_VERSION")),
         "Accept": "application/json",
     })
 }
