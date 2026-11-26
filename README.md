@@ -1,10 +1,9 @@
-# Halo Codex（Agent2API 插件）
+# Halo Codex
 
-独立仓库：https://github.com/postbiancheng/halo-codex  
+Agent2API WASM 插件仓库：https://github.com/postbiancheng/halo-codex
 
-Provider id 暂为 `codex-websocket`（兼容已装账号）。用 ChatGPT / Codex 订阅账号转发对话、查询用量与图片。
-
-前身：https://github.com/postbiancheng/codex-websocket
+用 ChatGPT / Codex 订阅账号转发对话、查询用量与生成图片。  
+Provider id 暂为 `codex-websocket`（兼容已装账号）。
 
 ## 能力
 
@@ -14,7 +13,7 @@ Provider id 暂为 `codex-websocket`（兼容已装账号）。用 ChatGPT / Cod
 | 模型 | 登录后 `GET /codex/models` 拉取；失败回退内置默认 |
 | 对话 | 默认 WebSocket；可切 HTTP SSE |
 | 用量 | `/wham/usage` + `/subscriptions`（含套餐到期） |
-| 图片 | `gpt-image-2` / `gpt-image-1.5` → `/codex/images/generations|edits` |
+| 图片 | `gpt-image-2` / `gpt-image-1.5` → `/codex/images/generations\|edits` |
 | 设置 | 转发方式、clientVersion、originator、默认推理强度 |
 | 错误 | classify / retry.decision：鉴权失效、额度/限流、内容策略 |
 
@@ -47,9 +46,9 @@ print(urllib.request.urlopen(req, timeout=60).read()[:200])
 PY
 ```
 
-## 阶段进度
+## 版本摘要
 
-- **0.1.5–0.1.10**：远程模型目录、转发方式、clientVersion、订阅到期映射（`credits` + `subscription.expireAt`）
-- **0.1.11**：originator / 默认推理强度设置；收尾清理旧包与旧安装版本
-- **0.1.12**：错误分类与重试策略（`classify` / `retry.decision`）。上游 Codex 接口强制 `store=false`，暂无法做 `previous_response_id` 会话链
-- **0.1.13**：图片生成/编辑（`gpt-image-2` / `gpt-image-1.5`）。上下文压缩需宿主 compact 钩子，暂未接
+- **0.1.5–0.1.10**：远程模型目录、转发方式、clientVersion、订阅到期映射
+- **0.1.11**：originator / 默认推理强度
+- **0.1.12**：错误分类与重试（上游强制 `store=false`，暂无 previous_response_id 会话链）
+- **0.1.13**：图片生成/编辑
