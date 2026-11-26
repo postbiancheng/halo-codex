@@ -419,7 +419,9 @@ fn request(body: &Value, session: &str, websocket: bool) -> Result<Value> {
         output["tools"] = json!(convert_tools(tools)?);
     }
     if let Some(choice) = body.get("tool_choice") {
-        output["tool_choice"] = convert_tool_choice(choice);
+        if choice.as_str() != Some("") {
+            output["tool_choice"] = convert_tool_choice(choice);
+        }
     }
     if let Some(value) = body.get("parallel_tool_calls") {
         output["parallel_tool_calls"] = value.clone();
@@ -642,7 +644,11 @@ fn session_key(body: &Value, params: &Value) -> String {
     body["prompt_cache_key"]
         .as_str()
         .or_else(|| params["session"].as_str())
-        .filter(|s| !s.is_empty() && s.len() <= 64 && s.bytes().all(|v| v.is_ascii_graphic()))
+        .filter(|s| {
+            !s.is_empty()
+                && s.len() <= 512
+                && s.bytes().all(|v| v.is_ascii_graphic())
+        })
         .map(str::to_owned)
         .unwrap_or_default()
 }

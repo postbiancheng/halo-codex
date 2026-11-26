@@ -12,7 +12,7 @@ Provider id：`halo-codex`。
 | 登录 | 设备授权 OAuth，或导入 access token |
 | 模型 | 登录后 `GET /codex/models` 拉取；失败回退内置默认 |
 | 对话 | 默认 WebSocket；可切 HTTP SSE |
-| 用量 | 仅订阅窗口（`/wham/usage` rate_limit + `/subscriptions` 到期）；不统计额外点数 |
+| 用量 | 订阅窗口（`/wham/usage` + `/subscriptions`）；额外点数可在窗口用尽后兜底 |
 | 图片 | `gpt-image-2` / `gpt-image-1.5` → `/codex/images/generations\|edits` |
 | 设置 | 转发方式、clientVersion、originator、默认推理强度 |
 | 错误 | classify / retry.decision：鉴权失效、额度/限流、内容策略 |
@@ -34,7 +34,7 @@ Provider id：`halo-codex`。
 python3 - <<'PY'
 import base64, json, urllib.request, os
 key = os.environ["AGENT2API_API_KEY"]
-zip_path = "dist/agent2api-wasm-halo-codex-0.2.4.zip"
+zip_path = "dist/agent2api-wasm-halo-codex-0.2.5.zip"
 body = json.dumps({"packB64": base64.b64encode(open(zip_path, "rb").read()).decode()}).encode()
 req = urllib.request.Request(
     "http://127.0.0.1:3065/api/plugins/install",
@@ -57,3 +57,4 @@ PY
 - **0.2.2**：用量改为仅订阅窗口（忽略额外点数）；工具支持 function / custom / web_search / namespace 与原生 `input`
 - **0.2.3**：加密推理 `include`、web_search 自动声明、拒绝无状态历史字段、过长 call_id 哈希（本地已备 CI workflow，推送需 `workflow` 授权）
 - **0.2.4**：目录补齐 serviceTiers/图片能力；私有 profile 回退 base_instructions 与 verbosity；HTTP `responses=experimental`；订阅配额错误码对齐
+- **0.2.5**：恢复额外点数兜底；`prompt_cache_key` 最长 512；空 `tool_choice` 不再下发

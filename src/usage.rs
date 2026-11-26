@@ -263,17 +263,55 @@ fn add_window(
     sources.push(source);
 }
 
+fn workspace_overage_open(raw: &Value, plan: &str, credits: Option<&Value>) -> bool {
+    // Magpie codexWorkspacePlans / codexReservePlans：保留 reserve 实验的两种套餐例外。
+    let workspace = matches!(
+        plan,
+        "free_workspace"
+            | "self_serve_business_usage_based"
+            | "business"
+            | "ent26"
+            | "enterprise_cbp_automation"
+            | "enterprise_cbp_trial"
+            | "enterprise_cbp_usage_based"
+            | "enterprise_cbp_view_only"
+            | "enterprise"
+            | "hc"
+            | "finserv"
+            | "law"
+            | "sci"
+            | "education"
+            | "edu"
+            | "edu_plus"
+            | "edu_pro"
+            | "quorum"
+            | "k12"
+    );
+    workspace
+        && credits
+            .and_then(|credits| credits.get("overage_limit_reached"))
+            .and_then(Value::as_bool)
+            == Some(false)
+        && raw
+            .pointer("/spend_control/reached")
+            .and_then(Value::as_bool)
+            != Some(true)
+        && raw
+            .pointer("/rate_limit_reached_type/type")
+            .and_then(Value::as_str)
+            .is_none_or(|reason| reason == "rate_limit_reached")
+}
+
 fn parse(raw: &Value) -> Result<Value> {
-    // Halo Codex only forwards ChatGPT/Codex subscription rate windows.
-    // Purchased credits / 额外点数 are intentionally ignored.
+    // Subscription windows are primary; purchased credits can still keep the account usable.
     if !raw.is_object()
-        || ["rate_limit", "plan_type"]
+        || ["rate_limit", "credits", "plan_type"]
             .iter()
             .all(|key| raw.get(*key).is_none())
     {
         return Err(Error::http(
             502,
-            "Codex 没有返回可识别的订阅额度数据，未把未知额度记为零",
+            "Codex 没有返回可识别的额度数据，未把未知额度记为零",
         ));
     }
     let plan = text(raw, &["plan_type"]);
@@ -297,6 +335,44 @@ fn parse(raw: &Value) -> Result<Value> {
                 );
             }
         }
+    }
+    let available = windows
+        .iter()
+        .filter_map(|window| window.get("remainingPercent").and_then(Value::as_f64))
+        .reduce(f64::min);
+    let credits = raw.get("credits").filter(|credits| credits.is_object());
+    let credit_balance = credits
+        .and_then(|credits| number(credits.get("balance")))
+        .filter(|balance| *balance >= 0.0);
+    let unlimited = credits
+        .and_then(|credits| credits.get("unlimited"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    let has_credits = credits
+        .and_then(|credits| credits.get("has_credits"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    // Host credit-detail popover (subscriptionLine / expireAt) only opens when
+    // usage.credits is a non-empty array — wallets alone are not enough.
+    let mut credit_rows = Vec::new();
+    if let Some(balance) = credit_balance {
+        wallets.push(json!({ "type": "credits", "displayName": "额外点数", "balance": balance, "unit": "credits" }));
+        let mut row = json!({ "name": "额外点数", "remain": balance, "unit": "credits" });
+        if unlimited {
+            row["unlimited"] = json!(true);
+        }
+        credit_rows.push(row);
+    } else if unlimited {
+        credit_rows.push(json!({ "name": "额外点数", "unlimited": true, "unit": "credits" }));
+    } else if credits.is_some() {
+        // Still emit a zero row so the host can surface subscription.expireAt.
+        credit_rows.push(json!({ "name": "额外点数", "remain": 0.0, "unit": "credits" }));
+    }
+    if credits.is_some() {
+        sources.push(
+            json!({ "id": "credits", "provider": PROVIDER, "label": "额外点数", "unit": "credits",
+            "remaining": credit_balance, "unlimited": unlimited }),
+        );
     }
     let additional = raw.get("additional_rate_limits").and_then(Value::as_array);
     for rate in additional.into_iter().flatten() {
@@ -323,27 +399,33 @@ fn parse(raw: &Value) -> Result<Value> {
             }
         }
     }
-    let available = windows
-        .iter()
-        .filter_map(|window| window.get("remainingPercent").and_then(Value::as_f64))
-        .reduce(f64::min);
-    let mut report = json!({
-        "available": available,
-        "unit": "%",
-        "windows": windows,
-        "wallets": wallets,
-        "quotaSources": sources,
-        "credits": [],
+    // 100% 订阅窗口不代表整个账号不可用：credits / 工作区超额可能仍可服务。
+    let can_spend_credits =
+        unlimited || has_credits && credit_balance.is_none_or(|balance| balance > 0.0);
+    let overage_open = workspace_overage_open(raw, plan, credits);
+    let mut report = json!({ "available": if can_spend_credits || overage_open { None } else { available },
+        "unit": "%", "windows": windows, "wallets": wallets, "quotaSources": sources,
+        "credits": credit_rows,
         "subscription": if plan.is_empty() { Value::Null } else { json!({ "planName": plan }) },
-        "allowed": raw.pointer("/rate_limit/allowed").and_then(Value::as_bool),
-    });
-    // Keep only subscription rate-limit trees for diagnostics — no credits payload.
-    report["raw"] = json!({
-        "plan_type": plan,
-        "rate_limit": raw.get("rate_limit"),
-        "additional_rate_limits": raw.get("additional_rate_limits"),
-        "rate_limit_reached_type": raw.get("rate_limit_reached_type"),
-    });
+        "unlimited": unlimited, "allowed": raw.pointer("/rate_limit/allowed").and_then(Value::as_bool),
+        "hasCredits": has_credits, "creditsBalance": credit_balance });
+    if can_spend_credits {
+        report["availableView"] = json!(if unlimited {
+            "额外点数不限量"
+        } else {
+            "订阅窗口之外仍有额外点数"
+        });
+    }
+    if let Some(count) = raw
+        .pointer("/rate_limit_reset_credits/available_count")
+        .and_then(Value::as_u64)
+    {
+        report["resetCreditsAvailable"] = json!(count);
+    }
+    report["raw"] = json!({ "plan_type": plan, "rate_limit": raw.get("rate_limit"), "credits": credits,
+        "spend_control": raw.get("spend_control"), "rate_limit_reached_type": raw.get("rate_limit_reached_type"),
+        "rate_limit_reset_credits": raw.get("rate_limit_reset_credits"),
+        "additional_rate_limits": raw.get("additional_rate_limits") });
     Ok(report)
 }
 
@@ -369,25 +451,36 @@ mod tests {
     }
 
     #[test]
-    fn ignores_purchased_credits_and_reports_subscription_windows_only() {
+    fn credits_keep_account_available_when_windows_are_exhausted() {
         let report = parse(&json!({
             "rate_limit": {"primary_window": {"used_percent": 100, "limit_window_seconds": 18000}},
             "credits": {"has_credits": true, "unlimited": false, "balance": "12.5"}
         }))
         .unwrap();
-        assert_eq!(report["available"], json!(0.0));
+        assert!(report["available"].is_null());
         assert_eq!(report["windows"][0]["remainingPercent"], json!(0.0));
-        assert!(report["credits"].as_array().unwrap().is_empty());
-        assert_eq!(report["wallets"].as_array().unwrap().len(), 1);
-        assert_eq!(report["wallets"][0]["unit"], "%");
-        assert!(report.get("creditsBalance").is_none());
-        assert!(report.get("hasCredits").is_none());
+        assert_eq!(report["creditsBalance"], json!(12.5));
+        assert_eq!(report["wallets"][1]["unit"], "credits");
+        assert_eq!(report["credits"][0]["name"], "额外点数");
+        assert_eq!(report["credits"][0]["remain"], json!(12.5));
+        assert_eq!(report["availableView"], "订阅窗口之外仍有额外点数");
+    }
+
+    #[test]
+    fn emits_zero_credit_row_so_host_can_show_subscription_line() {
+        let report = parse(&json!({
+            "plan_type": "plus",
+            "rate_limit": {"primary_window": {"used_percent": 97, "limit_window_seconds": 18000}},
+            "credits": {"has_credits": false, "unlimited": false, "balance": 0}
+        }))
+        .unwrap();
+        assert_eq!(report["credits"][0]["remain"], json!(0.0));
+        assert_eq!(report["credits"][0]["name"], "额外点数");
     }
 
     #[test]
     fn leaves_missing_allowance_unknown() {
         assert!(parse(&json!({})).is_err());
-        assert!(parse(&json!({"credits": {"balance": 1}})).is_err());
         let report = parse(&json!({"plan_type": "plus"})).unwrap();
         assert!(report["available"].is_null());
         assert!(report["windows"].as_array().unwrap().is_empty());
