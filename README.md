@@ -18,22 +18,25 @@ Provider id：`halo-codex`。许可证：AGPL-3.0-only。
 | 设置 | 转发方式、clientVersion、originator、默认推理强度 |
 | 错误 | classify / retry.decision：鉴权失效、额度/限流、内容策略 |
 
-## 构建 / 安装
+## 构建 / 安装 / 冒烟
 
 ```bash
 ./scripts/pack.sh
 ./scripts/checksum.sh
 export AGENT2API_API_KEY=...   # 或 ~/.agent2api/config.json 的 apiKey
 ./scripts/install-local.sh
+./scripts/smoke-local.sh       # 真实账号：模型刷新 + 用量 + 流式对话
 ```
 
 产物：`dist/agent2api-wasm-halo-codex-<version>.zip`
 
+**提交 / 推送 / 打 tag / Release 前必须先通过 `smoke-local.sh`。** 仅单元测试或插件 `ready` 不算过关。
+
 ## 工程化
 
-- 本地：`cargo test`、`cargo fmt --check`、`cargo clippy --target wasm32-unknown-unknown -- -D warnings`
+- 本地：`cargo test`、`cargo fmt --check`、`cargo clippy --target wasm32-unknown-unknown -- -D warnings`、`./scripts/smoke-local.sh`
 - CI：push / PR 跑 format、clippy、test、pack（`.github/workflows/ci.yml`）
-- 发版：对齐 `Cargo.toml` 与 `pack.json` 版本后：
+- 发版：冒烟通过后，对齐 `Cargo.toml` 与 `pack.json` 版本再：
 
 ```bash
 git tag v0.2.7 && git push origin v0.2.7
