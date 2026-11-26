@@ -1,0 +1,22 @@
+{
+  "abi": 1,
+  "verified": false,
+  "requires": [
+    "websocket.v1",
+    "accounts.cas.v1",
+    "chat.stream.v1",
+    "clock.v1",
+    "random.v1",
+    "http.v1",
+    "state.v1",
+    "login.forms.v1",
+    "login.interaction.v1",
+    "locks.v1",
+    "settings.v1",
+    "settings.schema.v1",
+    "catalog.v1"
+  ],
+  "origins": ["https://chatgpt.com", "https://auth.openai.com"],
+  "memory_mib": 128,
+  "concurrency": 8
+}

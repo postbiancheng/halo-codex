@@ -1,0 +1,11 @@
+{
+  "id": "agent2api-wasm-codex-websocket",
+  "name": "Codex WebSocket",
+  "description": "Codex 订阅的 WebSocket 对话与用量查询",
+  "version": "0.1.13",
+  "protocol": 1,
+  "providers": [
+    { "id": "codex-websocket", "label": "Codex WebSocket", "order": 46, "default_enabled": true }
+  ],
+  "entry": { "wasm32-unknown-unknown": "codex-websocket.wasm" }
+}
