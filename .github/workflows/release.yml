@@ -5,13 +5,18 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
 
 jobs:
+  check:
+    uses: ./.github/workflows/ci.yml
   release:
+    needs: check
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -44,10 +49,6 @@ jobs:
             printf '%s\n' "$release" >&2
             exit 1
           fi
-      - uses: dtolnay/rust-toolchain@stable
-        if: steps.release.outputs.exists == 'false'
-        with:
-          targets: wasm32-unknown-unknown
       - name: Pack
         if: steps.release.outputs.exists == 'false'
         run: ./scripts/pack.sh
@@ -63,6 +64,6 @@ jobs:
           VERSION="${TAG#v}"
           ZIP="dist/agent2api-wasm-halo-codex-${VERSION}.zip"
           SUM="dist/agent2api-wasm-halo-codex-${VERSION}.zip.sha256"
-          gh release create "$TAG" "$ZIP" "$SUM" \
+          gh release create "$TAG" "$ZIP" "$SUM" --verify-tag \
             --title "Halo Codex ${VERSION}" \
             --notes "Agent2API WASM pack \`agent2api-wasm-halo-codex\` ${VERSION}."

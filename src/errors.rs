@@ -334,5 +334,57 @@ mod tests {
             "headers": {},
             "body": {}
         })));
+        for body in [
+            json!({"error": {"message": "failed"}}),
+            json!({"type": "error"}),
+            json!({"success": false}),
+        ] {
+            assert!(is_error_response(&json!({
+                "status": 200,
+                "headers": { "Content-Type": "text/event-stream" },
+                "body": body
+            })));
+        }
+        assert!(!is_error_response(&json!({
+            "status": 200,
+            "headers": { "Content-Type": "text/event-stream" },
+            "body": {"error": null, "success": true}
+        })));
+    }
+
+    #[test]
+    fn normalizes_rate_limit_reset_times_and_relative_fallbacks() {
+        let now = sdk::now();
+        let seconds = now / 1000 + 120;
+        let limited = classify(
+            429,
+            &json!({"error":{"message":"slow down","code":"rate_limit_exceeded"},"reset_at":seconds}),
+        );
+        assert_eq!(limited["reset_at"], json!(seconds * 1000));
+
+        let milliseconds = (now + 180_000).max(100_000_000_000);
+        let limited = classify(
+            429,
+            &json!({"error":{"message":"slow down"},"resetAt":milliseconds}),
+        );
+        assert_eq!(limited["reset_at"], json!(milliseconds));
+
+        let relative = classify(
+            429,
+            &json!({"error":{"message":"slow down"},"reset_at":0,"retry_after":30}),
+        );
+        let relative_at = relative["reset_at"].as_i64().unwrap();
+        let delay = relative_at.saturating_sub(now);
+        assert!((25_000..=35_000).contains(&delay));
+
+        let decision = retry(&json!({
+            "attempt": 0,
+            "budget": 1,
+            "status": 429,
+            "body": {"error":{"message":"slow down"},"retry_after":30}
+        }));
+        assert_eq!(decision["action"], "retry");
+        assert!(decision["delay_ms"].as_u64().unwrap() <= 30_000);
+        assert!(decision["delay_ms"].as_u64().unwrap() > 0);
     }
 }

@@ -2,7 +2,7 @@
   "id": "agent2api-wasm-halo-codex",
   "name": "Halo Codex",
   "description": "Codex 订阅的 WebSocket 对话、用量查询与图片生成",
-  "version": "0.2.9",
+  "version": "0.2.10",
   "protocol": 1,
   "providers": [
     { "id": "halo-codex", "label": "Halo Codex", "order": 46, "default_enabled": true }

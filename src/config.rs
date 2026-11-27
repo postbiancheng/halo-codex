@@ -156,3 +156,28 @@ fn sanitize_token(trimmed: &str, fallback: &str) -> String {
         trimmed.to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitizes_version_and_originator_boundaries() {
+        assert_eq!(sanitize_version("1.2.3-beta_1"), "1.2.3-beta_1");
+        assert_eq!(sanitize_version(&"1".repeat(32)), "1".repeat(32));
+        for invalid in ["", "version", "1.2\r\nX-Test: injected", "版本", "1/2"] {
+            assert_eq!(sanitize_version(invalid), DEFAULT_CLIENT_VERSION);
+        }
+        assert_eq!(sanitize_version(&"1".repeat(33)), DEFAULT_CLIENT_VERSION);
+
+        assert_eq!(
+            sanitize_token("codex_cli-rs.1_test", "fallback"),
+            "codex_cli-rs.1_test"
+        );
+        assert_eq!(sanitize_token(&"a".repeat(64), "fallback"), "a".repeat(64));
+        for invalid in ["", "bad token", "bad\r\nheader", "客户端"] {
+            assert_eq!(sanitize_token(invalid, "fallback"), "fallback");
+        }
+        assert_eq!(sanitize_token(&"a".repeat(65), "fallback"), "fallback");
+    }
+}

@@ -295,9 +295,9 @@ fn workspace_overage_open(raw: &Value, plan: &str, credits: Option<&Value>) -> b
 fn parse(raw: &Value) -> Result<Value> {
     // Subscription windows are primary; purchased credits can still keep the account usable.
     if !raw.is_object()
-        || ["rate_limit", "credits", "plan_type"]
-            .iter()
-            .all(|key| raw.get(*key).is_none())
+        || (!raw.get("rate_limit").is_some_and(Value::is_object)
+            && !raw.get("credits").is_some_and(Value::is_object)
+            && text(raw, &["plan_type"]).is_empty())
     {
         return Err(Error::http(
             502,
@@ -483,11 +483,60 @@ mod tests {
     }
 
     #[test]
+    fn clamps_allowance_boundaries_without_accepting_negative_usage() {
+        let report = parse(&json!({
+            "rate_limit": {
+                "primary_window": {"used_percent": 0, "limit_window_seconds": 18000},
+                "secondary_window": {"used_percent": 125, "limit_window_seconds": 604800}
+            },
+            "additional_rate_limits": [{
+                "limit_name": "invalid",
+                "rate_limit": {"primary_window": {"used_percent": -1}}
+            }]
+        }))
+        .unwrap();
+        assert_eq!(report["windows"][0]["remainingPercent"], json!(100.0));
+        assert_eq!(report["windows"][1]["remainingPercent"], json!(0.0));
+        assert!(report["windows"][2].get("remainingPercent").is_none());
+        assert_eq!(report["available"], json!(0.0));
+    }
+
+    #[test]
+    fn exhausted_windows_need_usable_credits_or_unlimited_access() {
+        let zero = parse(&json!({
+            "rate_limit": {"primary_window": {"used_percent": 100}},
+            "credits": {"has_credits": true, "unlimited": false, "balance": 0}
+        }))
+        .unwrap();
+        assert_eq!(zero["available"], json!(0.0));
+        assert!(zero.get("availableView").is_none());
+
+        let unlimited = parse(&json!({
+            "rate_limit": {"primary_window": {"used_percent": 100}},
+            "credits": {"has_credits": true, "unlimited": true, "balance": 0}
+        }))
+        .unwrap();
+        assert!(unlimited["available"].is_null());
+        assert_eq!(unlimited["availableView"], "额外点数不限量");
+    }
+
+    #[test]
     fn leaves_missing_allowance_unknown() {
         assert!(parse(&json!({})).is_err());
         let report = parse(&json!({"plan_type": "plus"})).unwrap();
         assert!(report["available"].is_null());
         assert!(report["windows"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejects_null_allowance_containers() {
+        for raw in [
+            json!({"rate_limit": null}),
+            json!({"credits": null}),
+            json!({"plan_type": null}),
+        ] {
+            assert!(parse(&raw).is_err(), "accepted unrecognized payload: {raw}");
+        }
     }
 
     #[test]

@@ -99,9 +99,13 @@ fn identity(secret: &Value) -> String {
     secret["identity"].as_str().unwrap_or_default().to_string()
 }
 
+fn matches_cached_identity(cached: &Value, secret: &Value) -> bool {
+    cached["source"] == identity(secret)
+}
+
 fn cached_for(secret: &Value) -> Option<Value> {
     let snapshot = load().ok()?;
-    if snapshot.value["source"] != identity(secret) {
+    if !matches_cached_identity(&snapshot.value, secret) {
         return None;
     }
     let catalog = snapshot.value.get("catalog")?;
@@ -246,13 +250,14 @@ fn context_limit(value: &Value) -> i64 {
         "contextWindow",
     ]
     .into_iter()
-    .find_map(|key| {
+    .filter_map(|key| {
         value
             .get(key)?
             .as_i64()
             .or_else(|| value.get(key)?.as_f64().map(|n| n as i64))
             .filter(|n| *n > 0)
     })
+    .max()
     .unwrap_or(272_000)
 }
 
@@ -279,20 +284,7 @@ fn parse(report: &Value) -> Result<(Vec<Value>, Value)> {
         };
         let name = text(item, &["display_name", "name", "slug", "id"]).unwrap_or(id);
         // Prefer the larger window when both are present (matches Codex catalog).
-        let limit = [
-            "max_context_window",
-            "context_window",
-            "maxInputTokens",
-            "contextWindow",
-        ]
-        .into_iter()
-        .find_map(|key| {
-            item.get(key)?
-                .as_i64()
-                .or_else(|| item.get(key)?.as_f64().map(|n| n as i64))
-                .filter(|n| *n > 0)
-        })
-        .unwrap_or_else(|| context_limit(item));
+        let limit = context_limit(item);
         let mut row = model(id, name, limit);
         row["protocol"] = json!("responses");
         row["supportsToolCall"] = json!(true);
@@ -575,6 +567,51 @@ mod tests {
         assert_eq!(profiles["gpt-6.2-sol"]["defaultVerbosity"], "medium");
         assert_eq!(models[1]["id"], "gpt-6-luna");
         assert_eq!(models[1]["name"], "Luna");
+    }
+
+    #[test]
+    fn cache_requires_the_same_account_identity() {
+        let cached = json!({"source": "acct-1:user-1"});
+        assert!(matches_cached_identity(
+            &cached,
+            &json!({"identity": "acct-1:user-1"})
+        ));
+        assert!(!matches_cached_identity(
+            &cached,
+            &json!({"identity": "acct-2:user-2"})
+        ));
+        assert!(!matches_cached_identity(
+            &json!({}),
+            &json!({"identity": "acct-1:user-1"})
+        ));
+    }
+
+    #[test]
+    fn rejects_malformed_catalogs_and_uses_the_largest_valid_context_window() {
+        for report in [json!({}), json!({"models": {}}), json!({"data": []})] {
+            assert_eq!(parse(&report).unwrap_err().status, Some(502));
+        }
+        assert!(parse(&json!({"models": []})).unwrap().0.is_empty());
+        assert!(parse(&json!({"models": [{}, {"slug": "  "}]}))
+            .unwrap()
+            .0
+            .is_empty());
+
+        let (models, _) = parse(&json!({"models": [{
+            "slug": "boundary",
+            "context_window": 500000,
+            "max_context_window": 272000
+        }]}))
+        .unwrap();
+        assert_eq!(models[0]["capabilities"]["maxInputTokens"], 500000);
+
+        let (models, _) = parse(&json!({"models": [{
+            "slug": "fallback",
+            "context_window": -1,
+            "maxInputTokens": "invalid"
+        }]}))
+        .unwrap();
+        assert_eq!(models[0]["capabilities"]["maxInputTokens"], 272000);
     }
 
     #[test]

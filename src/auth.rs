@@ -175,8 +175,8 @@ fn from_tokens(tokens: &Value, old: Option<&Value>) -> Result<Value> {
     let mut secret = super::normalize_access(access)?;
     let refresh = tokens["refresh_token"]
         .as_str()
-        .or_else(|| old?.get("refreshToken")?.as_str())
         .filter(|v| !v.is_empty())
+        .or_else(|| old?.get("refreshToken")?.as_str().filter(|v| !v.is_empty()))
         .ok_or_else(|| Error::http(502, "Codex 未返回续期凭据"))?;
     secret["refreshToken"] = json!(refresh);
     Ok(secret)
@@ -260,6 +260,26 @@ pub fn credentials(force: bool) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+
+    #[test]
+    fn refresh_response_with_empty_refresh_token_keeps_the_old_one() {
+        let payload = URL_SAFE_NO_PAD.encode(
+            json!({
+                "exp": sdk::now() / 1000 + 3600,
+                "https://api.openai.com/auth": {"chatgpt_account_id": "acct-1"}
+            })
+            .to_string(),
+        );
+        let access = format!("hdr.{payload}.sig");
+        let old = json!({"refreshToken": "old-refresh-token-value-1234567890"});
+        let new = from_tokens(
+            &json!({"access_token": access, "refresh_token": ""}),
+            Some(&old),
+        )
+        .unwrap();
+        assert_eq!(new["refreshToken"], old["refreshToken"]);
+    }
 
     #[test]
     fn only_automatic_transient_failures_can_use_an_unexpired_token() {

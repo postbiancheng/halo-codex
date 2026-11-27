@@ -52,7 +52,14 @@ const AUTH_CLAIMS: &str = "https://api.openai.com/auth";
 const PROFILE_CLAIMS: &str = "https://api.openai.com/profile";
 
 fn jwt_claims(token: &str) -> Option<Value> {
-    let encoded = token.split('.').nth(1)?;
+    let mut segments = token.split('.');
+    let header = segments.next()?;
+    let encoded = segments.next()?;
+    let signature = segments.next()?;
+    if header.is_empty() || encoded.is_empty() || signature.is_empty() || segments.next().is_some()
+    {
+        return None;
+    }
     let bytes = URL_SAFE_NO_PAD
         .decode(encoded)
         .or_else(|_| URL_SAFE.decode(encoded))
@@ -108,6 +115,10 @@ fn normalize_access(access: &str) -> Result<Value> {
     normalize_tokens(access, None, false)
 }
 
+fn expired(expires: i64, refresh: Option<&str>, allow_expired: bool, now: i64) -> bool {
+    expires <= now && !(allow_expired && refresh.is_some())
+}
+
 fn normalize_tokens(access: &str, refresh: Option<&str>, allow_expired: bool) -> Result<Value> {
     let access = access.trim();
     if access.is_empty() || access.starts_with("sk-") {
@@ -119,9 +130,13 @@ fn normalize_tokens(access: &str, refresh: Option<&str>, allow_expired: bool) ->
     let claims = jwt_claims(access).ok_or_else(|| Error::http(400, "Codex 访问凭据格式无效"))?;
     let account = claim(&claims, "chatgpt_account_id")
         .ok_or_else(|| Error::http(400, "Codex 凭据缺少账号标识"))?;
-    let expires = claims["exp"].as_i64().unwrap_or(0).saturating_mul(1000);
+    let expires = claims["exp"]
+        .as_i64()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| Error::http(400, "Codex 凭据缺少有效过期时间"))?
+        .saturating_mul(1000);
     let refresh = refresh.map(str::trim).filter(|value| !value.is_empty());
-    if expires <= sdk::now() && !(allow_expired && refresh.is_some()) {
+    if expired(expires, refresh, allow_expired, sdk::now()) {
         return Err(Error::http(401, "Codex 登录凭据已过期"));
     }
     let user = claim(&claims, "chatgpt_user_id")
@@ -323,6 +338,87 @@ mod tests {
         assert_eq!(access, "aaa.bbb.ccc");
         assert_eq!(refresh.as_deref(), Some("refresh-token-value-1234567890"));
         assert!(parse_auth_blob("plain-token").is_none());
+    }
+
+    #[test]
+    fn rejects_malformed_jwt_shapes_and_missing_expiry() {
+        let exp = sdk::now() / 1000 + 3600;
+        let claims = json!({
+            "exp": exp,
+            "https://api.openai.com/auth": {"chatgpt_account_id": "acct-1"}
+        });
+        let payload = URL_SAFE_NO_PAD.encode(claims.to_string());
+        for token in [
+            format!("{payload}.sig"),
+            format!("hdr.{payload}"),
+            format!("hdr.{payload}.sig.extra"),
+            format!(".{payload}.sig"),
+            format!("hdr.{payload}."),
+        ] {
+            assert!(normalize_access(&token).is_err(), "accepted {token}");
+        }
+        assert!(normalize_access(&format!("hdr.{payload}.sig")).is_ok());
+        assert!(normalize_access("hdr.%%%.sig").is_err());
+        assert!(normalize_access(&fake_access(json!([]))).is_err());
+        let missing_account = fake_access(json!({"exp": exp}));
+        assert_eq!(
+            normalize_access(&missing_account).unwrap_err().status,
+            Some(400)
+        );
+
+        let missing_exp = fake_access(json!({
+            "https://api.openai.com/auth": {"chatgpt_account_id": "acct-1"}
+        }));
+        let error = normalize_tokens(&missing_exp, Some("refresh-token-value-1234567890"), true)
+            .unwrap_err();
+        assert_eq!(error.status, Some(400));
+    }
+
+    #[test]
+    fn handles_expiry_and_auth_json_variants_without_exposing_tokens() {
+        let refresh = "refresh-token-value-1234567890";
+        assert!(expired(1000, None, false, 1000));
+        assert!(!expired(1000, Some(refresh), true, 1000));
+        assert!(!expired(1001, None, false, 1000));
+
+        let future = fake_access(json!({
+            "exp": sdk::now() / 1000 + 3600,
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "acct-1",
+                "chatgpt_user_id": "user-1"
+            }
+        }));
+        for raw in [
+            json!({"tokens": {"access_token": future, "refresh_token": refresh}}),
+            json!({"secret": {"auth": {"accessToken": future, "refreshToken": refresh}}}),
+            json!({"pluginSecret": {"tokens": {"access_token": future}}}),
+        ] {
+            let (access, _) = parse_auth_blob(&raw.to_string()).unwrap();
+            assert_eq!(access, future);
+        }
+        assert!(parse_auth_blob(
+            &json!({
+                "auth_mode": "apikey",
+                "tokens": {"access_token": future}
+            })
+            .to_string()
+        )
+        .is_none());
+        assert!(parse_auth_blob("{not-json").is_none());
+
+        let account = normalize(&json!({
+            "source": {"payload": {"inputs": {
+                "accessToken": future,
+                "refreshToken": refresh
+            }}}
+        }))
+        .unwrap();
+        let serialized = account["public"].to_string();
+        assert!(!serialized.contains(&future));
+        assert!(!serialized.contains(refresh));
+        assert!(account["public"].get("accessToken").is_none());
+        assert!(account["public"].get("refreshToken").is_none());
+        assert!(account["public"].get("secret").is_none());
     }
 
     #[test]

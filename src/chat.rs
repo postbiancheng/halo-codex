@@ -496,11 +496,16 @@ struct Stream<'a> {
     id: String,
     tools: BTreeMap<u64, Tool>,
     started: bool,
+    #[cfg(test)]
+    chunks: Vec<Value>,
+    #[cfg(test)]
+    done: usize,
 }
 
 impl Stream<'_> {
     fn emit(&mut self, delta: Value, finish: Value, usage: Option<Value>) -> Result<()> {
         if !self.started {
+            #[cfg(not(test))]
             sdk::stream_head(200)?;
             self.emit_chunk(json!({"role":"assistant"}), Value::Null, None)?;
             self.started = true;
@@ -508,12 +513,18 @@ impl Stream<'_> {
         self.emit_chunk(delta, finish, usage)
     }
 
-    fn emit_chunk(&self, delta: Value, finish: Value, usage: Option<Value>) -> Result<()> {
+    fn emit_chunk(&mut self, delta: Value, finish: Value, usage: Option<Value>) -> Result<()> {
         let mut frame = json!({"id":self.id,"object":"chat.completion.chunk","model":self.model,
             "created":sdk::now() / 1000,"choices":[{"index":0,"delta":delta,"finish_reason":finish}]});
         if let Some(value) = usage {
             frame["usage"] = value;
         }
+        #[cfg(test)]
+        {
+            self.chunks.push(frame);
+            Ok(())
+        }
+        #[cfg(not(test))]
         sdk::stream_event(&frame)
     }
 
@@ -543,7 +554,20 @@ impl Stream<'_> {
             );
         }
         let Some(tool) = self.tools.get_mut(&key) else {
-            return Ok(());
+            if string(&event["type"]) != "response.output_item.done" {
+                return Err(Error::http(502, "Halo Codex 工具调用事件顺序无效"));
+            }
+            if !matches!(
+                string(&event["item"]["type"]),
+                "function_call" | "custom_tool_call"
+            ) {
+                return Ok(());
+            }
+            self.tool(event, true)?;
+            if !self.tools.contains_key(&key) {
+                return Err(Error::http(502, "Halo Codex 工具调用事件无效"));
+            }
+            return self.tool(event, false);
         };
         let item = &event["item"];
         let args = if let Some(delta) = event["delta"].as_str() {
@@ -571,7 +595,13 @@ impl Stream<'_> {
 
     /// Returns `true` when the upstream response finished.
     fn handle(&mut self, event: &Value) -> Result<bool> {
+        if !event.is_object() {
+            return Err(Error::http(502, "Halo Codex 返回无效事件"));
+        }
         let kind = string(&event["type"]);
+        if kind.is_empty() {
+            return Err(Error::http(502, "Halo Codex 返回无效事件"));
+        }
         if matches!(kind, "error" | "response.failed") {
             let err = event
                 .get("error")
@@ -625,6 +655,11 @@ impl Stream<'_> {
                     "tool_calls"
                 };
                 self.emit(json!({}), json!(finish), usage)?;
+                #[cfg(test)]
+                {
+                    self.done += 1;
+                }
+                #[cfg(not(test))]
                 sdk::stream_bytes(b"data: [DONE]\n\n")?;
                 return Ok(true);
             }
@@ -717,6 +752,10 @@ pub fn forward(body: Value, params: &Value, secret: &Value) -> Result<()> {
         id: format!("chatcmpl-{request_id}"),
         tools: BTreeMap::new(),
         started: false,
+        #[cfg(test)]
+        chunks: Vec::new(),
+        #[cfg(test)]
+        done: 0,
     };
     match config::transport()?.as_str() {
         config::TRANSPORT_HTTP => {
@@ -815,15 +854,134 @@ fn forward_http(
 mod tests {
     use super::*;
 
-    #[test]
-    fn upstream_failure_after_creation_does_not_start_the_stream() {
-        let mut stream = Stream {
+    fn stream() -> Stream<'static> {
+        Stream {
             model: "test-model",
             id: "test-id".into(),
             tools: BTreeMap::new(),
             started: false,
-        };
+            chunks: Vec::new(),
+            done: 0,
+        }
+    }
+
+    fn choice(stream: &Stream<'_>, index: usize) -> Value {
+        stream.chunks[index]["choices"][0].clone()
+    }
+
+    #[test]
+    fn rejects_malformed_and_out_of_order_events() {
+        for event in [Value::Null, json!([]), json!({}), json!({"type":1})] {
+            let error = stream().handle(&event).unwrap_err();
+            assert_eq!(error.status, Some(502));
+        }
+        let error = stream()
+            .handle(&json!({
+                "type":"response.function_call_arguments.delta",
+                "output_index":3,
+                "delta":"{}"
+            }))
+            .unwrap_err();
+        assert_eq!(error.status, Some(502));
+    }
+
+    #[test]
+    fn ignores_non_tool_output_item_done() {
+        for item_type in ["message", "reasoning"] {
+            let mut stream = stream();
+            assert!(!stream
+                .handle(&json!({
+                    "type":"response.output_item.done",
+                    "output_index":0,
+                    "item":{"type":item_type}
+                }))
+                .unwrap());
+            assert!(stream.chunks.is_empty());
+            assert!(stream.tools.is_empty());
+        }
+    }
+
+    #[test]
+    fn emits_tool_arguments_when_done_precedes_added() {
+        let mut stream = stream();
+        stream
+            .handle(&json!({
+                "type":"response.output_item.done",
+                "output_index":1,
+                "item":{"type":"function_call","call_id":"call-1","name":"lookup","arguments":"{\"q\":42}"}
+            }))
+            .unwrap();
+        stream
+            .handle(&json!({
+                "type":"response.output_item.added",
+                "output_index":1,
+                "item":{"type":"function_call","call_id":"call-1","name":"lookup","arguments":""}
+            }))
+            .unwrap();
+        assert_eq!(choice(&stream, 0)["delta"]["role"], "assistant");
+        assert_eq!(
+            choice(&stream, 1)["delta"]["tool_calls"][0]["function"]["name"],
+            "lookup"
+        );
+        assert_eq!(
+            choice(&stream, 2)["delta"]["tool_calls"][0]["function"]["arguments"],
+            "{\"q\":42}"
+        );
+        stream
+            .handle(&json!({
+                "type":"response.output_item.done",
+                "output_index":1,
+                "item":{"type":"function_call","call_id":"call-1","name":"lookup","arguments":"{\"q\":42}"}
+            }))
+            .unwrap();
+        assert_eq!(stream.chunks.len(), 3);
+        let tool = stream.tools.get(&1).unwrap();
+        assert_eq!(tool.index, 0);
+        assert!(tool.saw_delta);
+        assert_eq!(stream.tools.len(), 1);
+    }
+
+    #[test]
+    fn normal_text_and_reasoning_preserve_chunk_order() {
+        let mut stream = stream();
+        stream
+            .handle(&json!({"type":"response.reasoning_summary_text.delta","delta":"think"}))
+            .unwrap();
+        stream
+            .handle(&json!({"type":"response.output_text.delta","delta":"hello"}))
+            .unwrap();
+        stream
+            .handle(&json!({"type":"response.refusal.delta","delta":" no"}))
+            .unwrap();
+        assert!(stream
+            .handle(&json!({"type":"response.completed","response":{}}))
+            .unwrap());
+        assert_eq!(choice(&stream, 0)["delta"]["role"], "assistant");
+        assert_eq!(choice(&stream, 1)["delta"]["reasoning_content"], "think");
+        assert_eq!(choice(&stream, 2)["delta"]["content"], "hello");
+        assert_eq!(choice(&stream, 3)["delta"]["content"], " no");
+        assert_eq!(choice(&stream, 4)["finish_reason"], "stop");
+        assert_eq!(stream.done, 1);
+    }
+
+    #[test]
+    fn terminal_emits_finish_usage_and_done() {
+        let terminal = json!({
+            "type":"response.completed",
+            "response":{"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}
+        });
+        let mut stream = stream();
+        assert!(stream.handle(&terminal).unwrap());
+        assert_eq!(choice(&stream, 1)["finish_reason"], "stop");
+        assert_eq!(stream.chunks[1]["usage"]["total_tokens"], 3);
+        assert_eq!(stream.done, 1);
+    }
+
+    #[test]
+    fn upstream_failure_after_creation_does_not_start_the_stream() {
+        let mut stream = stream();
         assert!(!stream.handle(&json!({"type":"response.created"})).unwrap());
+        let before = sdk::now();
         let error = stream
             .handle(&json!({
                 "type":"response.failed",
@@ -831,7 +989,8 @@ mod tests {
             }))
             .unwrap_err();
         assert_eq!(error.status, Some(429));
-        assert_eq!(error.reset_at, Some(sdk::now() + 30_000));
+        let delay = error.reset_at.unwrap().saturating_sub(before);
+        assert!((25_000..=35_000).contains(&delay));
         assert!(!stream.started);
     }
 

@@ -126,7 +126,10 @@ fn reference_urls(body: &Value) -> Result<Vec<String>> {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| Error::http(400, "参考图缺少 image_url"))?;
-            if !(url.starts_with("data:image/") || url.starts_with("https://")) {
+            let valid = url.starts_with("data:image/")
+                || url::Url::parse(url)
+                    .is_ok_and(|parsed| parsed.scheme() == "https" && parsed.host_str().is_some());
+            if !valid {
                 return Err(Error::http(400, "参考图需要 data URL 或 https 地址"));
             }
             Ok(url.to_string())
@@ -271,6 +274,81 @@ mod tests {
         assert_eq!(rate_limit.status, Some(429));
         let uncertain = response_payload(200, Ok(Vec::new())).unwrap_err();
         assert_eq!(uncertain.code.as_deref(), Some("image_output_uncertain"));
+    }
+
+    #[test]
+    fn classifies_image_http_errors_and_reset_times() {
+        let unauthorized = response_payload(
+            401,
+            Ok(br#"{"error":{"message":"Unauthorized","code":"invalid_api_key"}}"#.to_vec()),
+        )
+        .unwrap_err();
+        assert_eq!(unauthorized.status, Some(401));
+        assert_eq!(unauthorized.code.as_deref(), Some("codex_image_error"));
+
+        let reset_at = sdk::now() / 1000 + 60;
+        let body = serde_json::to_vec(&json!({
+            "error": {"message": "Rate limit exceeded", "code": "rate_limit_exceeded"},
+            "reset_at": reset_at
+        }))
+        .unwrap();
+        let limited = response_payload(429, Ok(body)).unwrap_err();
+        assert_eq!(limited.status, Some(429));
+        assert_eq!(limited.reset_at, Some(reset_at * 1000));
+
+        let envelope = response_payload(
+            200,
+            Ok(br#"{"error":{"message":"generation failed"}}"#.to_vec()),
+        )
+        .unwrap_err();
+        assert_eq!(envelope.status, Some(502));
+    }
+
+    #[test]
+    fn recognizes_only_supported_image_signatures() {
+        assert_eq!(mime(b"\x89PNG\r\n\x1a\nrest"), Some("image/png"));
+        assert_eq!(mime(b"\xff\xd8\xffrest"), Some("image/jpeg"));
+        assert_eq!(mime(b"RIFF1234WEBPrest"), Some("image/webp"));
+        assert_eq!(mime(b"RIFF1234WAVErest"), None);
+        assert_eq!(mime(b"GIF89a"), None);
+    }
+
+    #[test]
+    fn rejects_invalid_base64_and_unsupported_image_bytes() {
+        let invalid = pack_result(&json!({"data":[{"b64_json":"%%%"}]})).unwrap_err();
+        assert_eq!(invalid.code.as_deref(), Some("image_output_uncertain"));
+
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"GIF89a");
+        let unsupported = pack_result(&json!({"data":[{"b64_json":encoded}]})).unwrap_err();
+        assert_eq!(unsupported.code.as_deref(), Some("image_output_uncertain"));
+
+        let missing = pack_result(&json!({"data":[{}]})).unwrap_err();
+        assert_eq!(missing.code.as_deref(), Some("image_output_uncertain"));
+    }
+
+    #[test]
+    fn validates_reference_image_urls_and_counts() {
+        let valid = reference_urls(&json!({"images":[
+            "data:image/png;base64,iVBORw0KGgo=",
+            {"image_url":"https://example.com/image.webp"},
+            {"image_url":{"url":"https://example.com/image.jpg"}}
+        ]}))
+        .unwrap();
+        assert_eq!(valid.len(), 3);
+
+        for body in [
+            json!({"images":[]}),
+            json!({"images":["http://example.com/image.png"]}),
+            json!({"images":["https://"]}),
+            json!({"images":[{}]}),
+        ] {
+            assert!(
+                reference_urls(&body).is_err(),
+                "accepted invalid input: {body}"
+            );
+        }
+        let too_many = json!({"images":vec!["data:image/png;base64,iVBORw0KGgo=";17]});
+        assert!(reference_urls(&too_many).is_err());
     }
 
     #[test]
